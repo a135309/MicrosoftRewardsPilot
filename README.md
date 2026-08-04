@@ -139,7 +139,7 @@ services:
 {
   "workers": {
     "doDesktopSearch": true,   // 桌面端搜索
-    "doMobileSearch": true,    // 移动端搜索（L2 起）
+    "doMobileSearch": false,   // 已停用：与桌面端共享搜索积分上限
     "doMorePromotions": true   // Explore on Bing / 推广任务
   }
 }
@@ -305,7 +305,7 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 > 新版 rewards.bing.com 已迁移为 Next.js SPA，旧的 DOM 抓取失效；本项目改为对接 **dapi 后端 API**（活动直接领取）+ 真实搜索/视觉搜索。
 - **每日任务集 / 每日活动 / 推广任务** - 经 dapi API 自动领取「点击即完成」类活动（urlreward / 阅读赚取 / 签到，含每日一言等 urlreward 卡片）；需作答的互动 Quiz 不会被自动完成
 - **桌面端搜索** - 真实、拟人节奏的必应搜索，进度读自 dapi
-- **移动端搜索** - 移动设备模拟（Level 2 起，与 PC 共享当日搜索上限）
+- **移动端搜索** - 默认停用；与 PC 共享搜索积分上限，避免额外浏览器负载与限流风险
 - **Explore on Bing** - 经奖励 flyout 的类目搜索完成
 - **视觉搜索** - 自动完成必应视觉搜索活动
 - **每日签到** - 网页签到 + 必应应用签到（两种独立签到）
@@ -358,12 +358,12 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "runOnZeroPoints": false,
   "clusters": 1,
   "saveFingerprint": {
-    "mobile": true,
+    "mobile": false,
     "desktop": true
   },
   "workers": {
     "doDesktopSearch": true,
-    "doMobileSearch": true,
+    "doMobileSearch": false,
     "doMorePromotions": true
   },
   "searchOnBingLocalQueries": true,

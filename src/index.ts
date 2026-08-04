@@ -23,7 +23,7 @@ import { VisualSearchRunner } from './rewards-api/VisualSearchRunner'
 import { Account } from '../interfaces/Account'
 import Axios from '../utils/Axios'
 import { StartupConfig } from '../utils/StartupConfig'
-import { TwoFactorAuthRequiredError, LoginTimeoutError } from '../interfaces/Errors'
+import { LoginTimeoutError } from '../interfaces/Errors'
 
 
 // Main bot class
@@ -266,79 +266,11 @@ export class MicrosoftRewardsBot {
         // 🎯 为新账户清理弹窗处理历史
         this.browser.utils.clearPopupHistory()
 
-        // Reset tracked child instances (e.g. the parallel-mode mobile bot) for this account
-        this.spawnedInstances = []
-
-        if (this.config.parallel) {
-                // 并行处理，但要分别处理错误
-                const results = await Promise.allSettled([
-                    this.Desktop(account).catch(error => {
-                        log('main', 'MAIN-ERROR', `Desktop task failed for ${account.email}: ${error}`, 'error')
-                        throw error
-                    }),
-                    (async () => {
-                        const mobileInstance = new MicrosoftRewardsBot(true)
-                        mobileInstance.axios = this.axios
-                        this.spawnedInstances.push(mobileInstance)
-                        return mobileInstance.Mobile(account).catch(error => {
-                            // 特殊处理2FA错误
-                            if (error instanceof TwoFactorAuthRequiredError) {
-                                log('main', 'MAIN-2FA-SKIP', `Mobile task skipped for ${account.email}: ${error.message}`, 'warn')
-                                return // 不抛出错误，视为成功跳过
-                            }
-                            log('main', 'MAIN-ERROR', `Mobile task failed for ${account.email}: ${error}`, 'error')
-                            throw error
-                        })
-                    })()
-                ])
-
-                // 检查并行任务的结果
-                let hasFailure = false
-                results.forEach((result, index) => {
-                    const taskType = index === 0 ? 'Desktop' : 'Mobile'
-                    if (result.status === 'rejected') {
-                        log('main', 'MAIN-ERROR', `${taskType} task failed for ${account.email}: ${result.reason}`, 'error')
-                        hasFailure = true
-                    } else {
-                        log('main', 'MAIN-SUCCESS', `${taskType} task completed for ${account.email}`, 'log', 'green')
-                    }
-                })
-
-                if (hasFailure) {
-                    throw new Error('One or more parallel tasks failed')
-                }
-            } else {
-                const taskFailures: string[] = []
-
-                // 顺序处理
-                try {
-                    this.isMobile = false
-                    await this.Desktop(account)
-                    log('main', 'MAIN-SUCCESS', `Desktop task completed for ${account.email}`, 'log', 'green')
-                } catch (error) {
-                    log('main', 'MAIN-ERROR', `Desktop task failed for ${account.email}: ${error}`, 'error')
-                    taskFailures.push(`Desktop task failed: ${error instanceof Error ? error.message : String(error)}`)
-                }
-
-                try {
-                    this.isMobile = true
-                    await this.Mobile(account)
-                    log('main', 'MAIN-SUCCESS', `Mobile task completed for ${account.email}`, 'log', 'green')
-                } catch (error) {
-                    // 特殊处理2FA错误
-                    if (error instanceof TwoFactorAuthRequiredError) {
-                        log('main', 'MAIN-2FA-SKIP', `Mobile task skipped for ${account.email}: ${error.message}`, 'warn')
-                        // 不视为错误，继续处理下一个账户
-                    } else {
-                        log('main', 'MAIN-ERROR', `Mobile task failed for ${account.email}: ${error}`, 'error')
-                        taskFailures.push(`Mobile task failed: ${error instanceof Error ? error.message : String(error)}`)
-                    }
-                }
-
-                if (taskFailures.length > 0) {
-                    throw new Error(taskFailures.join(' | '))
-                }
-            }
+        // Microsoft now shares one search-points cap across desktop and mobile.
+        // Run desktop only to avoid a second browser, duplicate OAuth, and extra throttling risk.
+        this.isMobile = false
+        await this.Desktop(account)
+        log('main', 'MAIN-SUCCESS', `Desktop task completed for ${account.email}`, 'log', 'green')
     }
 
     private registerManagedBrowser(managedBrowser: ManagedBrowser): void {

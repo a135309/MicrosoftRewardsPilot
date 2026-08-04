@@ -139,7 +139,7 @@ services:
 {
   "workers": {
     "doDesktopSearch": true,   // Desktop search
-    "doMobileSearch": true,    // Mobile search (Level 2+)
+    "doMobileSearch": false,   // Disabled: shares the search-points cap with desktop
     "doMorePromotions": true   // Explore on Bing / promotional tasks
   }
 }
@@ -305,7 +305,7 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 > The new rewards.bing.com is now a Next.js SPA with no scrapable DOM; this project instead talks to the **dapi backend API** (activities claimed directly) plus real search / visual search.
 - **Daily Task Set / Daily Activities / Promotional Tasks** - "click-to-complete" activities auto-claimed via the dapi API (urlreward / read-to-earn / check-in, including daily-quote-style urlreward cards); interactive quizzes that require answering are NOT auto-completed
 - **Desktop Search** - Real, human-paced Bing searches; progress read from dapi
-- **Mobile Search** - Mobile device simulation (Level 2+, shares the daily search cap with PC)
+- **Mobile Search** - Disabled by default; shares the PC search-points cap and adds browser load and throttling risk
 - **Explore on Bing** - Completed via category search from the rewards flyout
 - **Visual Search** - Auto-completes the Bing visual-search activity
 - **Daily Check-in** - Web check-in + Bing-app check-in (two independent check-ins)
@@ -356,12 +356,12 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "runOnZeroPoints": false,
   "clusters": 1,
   "saveFingerprint": {
-    "mobile": true,
+    "mobile": false,
     "desktop": true
   },
   "workers": {
     "doDesktopSearch": true,
-    "doMobileSearch": true,
+    "doMobileSearch": false,
     "doMorePromotions": true
   },
   "searchOnBingLocalQueries": true,

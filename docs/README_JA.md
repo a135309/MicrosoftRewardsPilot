@@ -139,7 +139,7 @@ services:
 {
   "workers": {
     "doDesktopSearch": true,   // デスクトップ検索
-    "doMobileSearch": true,    // モバイル検索（L2 以降）
+    "doMobileSearch": false,   // 無効：デスクトップ検索とポイント上限を共有
     "doMorePromotions": true   // Explore on Bing / プロモーションタスク
   }
 }
@@ -305,7 +305,7 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 > 新しい rewards.bing.com は Next.js SPA に移行し、旧来の DOM スクレイピングは使えなくなりました。本プロジェクトは **dapi バックエンド API** に接続（アクティビティを直接獲得）＋ 実際の検索／視覚検索に切り替えています。
 - **デイリータスクセット / 毎日のアクティビティ / プロモーションタスク** - dapi API 経由で「クリックで完了」型アクティビティを自動獲得（urlreward / 読んで稼ぐ / チェックイン、毎日の一言などの urlreward カード含む）。回答が必要なインタラクティブ Quiz は自動完了されません
 - **デスクトップ検索** - 実際の、人間らしいペースの Bing 検索。進捗は dapi から読み取り
-- **モバイル検索** - モバイルデバイスシミュレーション（Level 2 以降、PC と当日の検索上限を共有）
+- **モバイル検索** - デフォルトで無効。PC と検索ポイント上限を共有し、追加のブラウザ負荷と制限リスクがあるため
 - **Explore on Bing** - 報酬 flyout からのカテゴリ検索で完了
 - **視覚検索** - Bing 視覚検索アクティビティを自動完了
 - **毎日チェックイン** - ウェブチェックイン ＋ Bing アプリチェックイン（2種類の独立したチェックイン）
@@ -356,12 +356,12 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "runOnZeroPoints": false,
   "clusters": 1,
   "saveFingerprint": {
-    "mobile": true,
+    "mobile": false,
     "desktop": true
   },
   "workers": {
     "doDesktopSearch": true,
-    "doMobileSearch": true,
+    "doMobileSearch": false,
     "doMorePromotions": true
   },
   "searchOnBingLocalQueries": true,

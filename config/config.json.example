@@ -6,7 +6,7 @@
     "runOnZeroPoints": false,
     "clusters": 1,
     "saveFingerprint": {
-        "mobile": true,
+        "mobile": false,
         "desktop": true
     },
     "workers": {
@@ -14,7 +14,7 @@
         "doMorePromotions": true,
         "doPunchCards": true,
         "doDesktopSearch": true,
-        "doMobileSearch": true,
+        "doMobileSearch": false,
         "doDailyCheckIn": true,
         "doReadToEarn": true
     },
