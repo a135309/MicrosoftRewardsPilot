@@ -16,7 +16,8 @@
         "doDesktopSearch": true,
         "doMobileSearch": false,
         "doDailyCheckIn": true,
-        "doReadToEarn": true
+        "doReadToEarn": true,
+        "doClaimablePoints": true
     },
     "popupHandling": {
         "enabled": false,

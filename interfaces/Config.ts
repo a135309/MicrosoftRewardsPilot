@@ -91,6 +91,7 @@ export interface ConfigWorkers {
     doMobileSearch: boolean;
     doDailyCheckIn: boolean;
     doReadToEarn: boolean;
+    doClaimablePoints?: boolean;
 }
 
 export interface ConfigChinaRegion {
