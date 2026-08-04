@@ -198,7 +198,7 @@ export class MicrosoftRewardsBot {
                 // 添加账户间的延迟，避免请求过于频繁
                 if (i < accounts.length - 1) {
                     // 使用配置文件中的延迟设置，如果没有则使用默认值
-                    const accountDelayConfig = this.config.accountDelay || { min: '5min', max: '15min' }
+                    const accountDelayConfig = this.config.accountDelay || { min: '5min', max: '8min' }
                     const minDelay = this.utils.stringToMs(accountDelayConfig.min)
                     const maxDelay = this.utils.stringToMs(accountDelayConfig.max)
                     const delayMs = this.utils.randomNumber(minDelay, maxDelay)
@@ -442,7 +442,7 @@ export class MicrosoftRewardsBot {
                     log(this.isMobile, 'MAIN', 'No search promotion available — skipping mobile browser')
                     return
                 }
-                if (searchPromo.max > 0 && searchPromo.progress >= searchPromo.max) {
+                if (searchPromo.complete || searchPromo.progress >= searchPromo.max) {
                     log(this.isMobile, 'MAIN', 'Daily search cap already filled — skipping mobile browser')
                     return
                 }

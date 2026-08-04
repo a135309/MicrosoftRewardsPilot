@@ -2,7 +2,7 @@ import { Page } from 'rebrowser-playwright'
 
 import { RewardsApi, ApiPromotion } from './RewardsApi'
 import { HumanBehaviorSimulator } from '../anti-detection/human-behavior'
-import { IntelligentDelaySystem } from '../anti-detection/intelligent-delay'
+import { IntelligentDelaySystem, normalizeSearchDelayConfig } from '../anti-detection/intelligent-delay'
 import { GeoLanguageDetector } from '../../utils/GeoLanguage'
 import { MicrosoftRewardsBot } from '../index'
 
@@ -16,19 +16,24 @@ import { MicrosoftRewardsBot } from '../index'
  *    per-account + per-day random subset of a larger pool — never the same fixed basket every run.
  *  - Each query is typed character-by-character (HumanBehaviorSimulator), spaced with the
  *    IntelligentDelaySystem, with variable scrolling and the occasional result click + dwell.
- *  - The dapi progress re-check fires on a randomised cadence, and the loop stops the moment the
- *    daily cap is reached (no pointless extra searches).
+ *  - DAPI progress refreshes after every two successful searches, or every search near the cap;
+ *    completion is checked before any next inter-search delay.
  */
 export class SearchRunner {
     private human = new HumanBehaviorSimulator()
-    private delay = new IntelligentDelaySystem()
+    private delay: IntelligentDelaySystem
 
     constructor(
         private bot: MicrosoftRewardsBot,
         private api: RewardsApi,
         private page: Page,
-        private accountEmail?: string
-    ) {}
+        private accountEmail?: string,
+        delaySystem?: IntelligentDelaySystem
+    ) {
+        this.delay = delaySystem || new IntelligentDelaySystem(
+            normalizeSearchDelayConfig(this.bot.config.searchSettings?.searchDelay)
+        )
+    }
 
     private log(message: string, type: 'log' | 'warn' = 'log', color?: 'green' | 'yellow'): void {
         this.bot.log(this.bot.isMobile, 'SEARCH', message, type, color)
@@ -39,7 +44,13 @@ export class SearchRunner {
         const tag = this.bot.isMobile ? 'MobileSearch' : 'PCSearch'
 
         // One read up front: gives us both the search promotion AND the account market (for query locale).
-        const data = await this.api.getData()
+        let data: Awaited<ReturnType<RewardsApi['getData']>>
+        try {
+            data = await this.api.getData()
+        } catch (error) {
+            this.log(`Unable to read ${tag} promotion: ${error}`, 'warn')
+            return { gained: 0 }
+        }
         let promo = data.promotions.find(p => p.type === 'search' && p.classificationTag === tag)
             || data.promotions.find(p => p.type === 'search')
         if (!promo) {
@@ -50,7 +61,7 @@ export class SearchRunner {
         const lang = GeoLanguageDetector.getLanguageFromCountry((data.country || 'us').toUpperCase())
         const startProgress = promo.progress
         this.log(`${tag}: ${promo.progress}/${promo.max} points | query locale: ${lang}`)
-        if (promo.progress >= promo.max && promo.max > 0) {
+        if (this.isComplete(promo)) {
             this.log('Search points already maxed today', 'log', 'green')
             return { gained: 0 }
         }
@@ -58,43 +69,138 @@ export class SearchRunner {
         const safetyCap = 40
         const queries = this.buildQueries(safetyCap, lang)
         let count = 0
-        let stalls = 0
-        let nextCheckAt = this.bot.utils.randomNumber(2, 5)
+        let successfulSearches = 0
+        let searchesSinceRefresh = 0
+        let consecutiveFailures = 0
 
         // Land on Bing once; subsequent searches reuse the result page's search box.
         await this.page.goto('https://www.bing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
         await this.bot.utils.wait(this.bot.utils.randomNumber(1500, 3500))
 
-        while (promo.progress < promo.max && count < safetyCap && queries.length) {
+        while (!this.isComplete(promo) && count < safetyCap && queries.length) {
             const query = queries.shift() as string
+            count++
+            let searchSucceeded = false
             try {
-                await this.searchOnce(query)
+                searchSucceeded = await this.searchOnce(query)
+                if (!searchSucceeded) {
+                    this.log(`Search "${query}" did not complete`, 'warn')
+                }
             } catch (error) {
                 this.log(`Search "${query}" failed: ${error}`, 'warn')
             }
-            count++
 
-            // Re-check progress from the API on a randomised cadence (every 2-5 searches), not a fixed beat.
-            if (count >= nextCheckAt) {
-                await this.bot.utils.wait(this.bot.utils.randomNumber(1500, 3500))
-                const updated = await this.findSearchPromotion(tag)
-                if (updated) {
-                    if (updated.progress === promo.progress) { stalls++ } else { stalls = 0 }
-                    promo = updated
-                    this.log(`Progress: ${promo.progress}/${promo.max} (after ${count} searches)`)
-                    if (stalls >= 2) { this.log('Search progress stalled — stopping', 'warn'); break }
+            if (searchSucceeded) {
+                successfulSearches++
+                searchesSinceRefresh++
+                consecutiveFailures = 0
+            } else {
+                consecutiveFailures++
+            }
+
+            const remaining = this.remainingPoints(promo)
+            const nearCompletion = remaining !== null && remaining <= 6
+            const shouldRefresh = !searchSucceeded || nearCompletion || searchesSinceRefresh >= 2
+
+            // Refresh on cadence before waiting. Near the cap, never trust one unchanged snapshot.
+            if (shouldRefresh) {
+                const previous = promo
+                let updated: ApiPromotion | undefined
+                try {
+                    updated = await this.findSearchPromotion(tag)
+                } catch (error) {
+                    this.log(`Unable to refresh ${tag} progress: ${error}`, 'warn')
+                    break
                 }
-                nextCheckAt = count + this.bot.utils.randomNumber(2, 5)
+                if (!updated) {
+                    this.log(`No ${tag} promotion returned during progress refresh`, 'warn')
+                    break
+                }
+                searchesSinceRefresh = 0
+
+                if (this.promotionChanged(previous, updated)) {
+                    promo = updated
+                    this.log('Search promotion identity or cap changed; stopping to avoid crossing reward reset', 'warn')
+                    break
+                }
+
+                promo = updated
+                this.log(`Progress: ${promo.progress}/${promo.max} (after ${count} searches)`)
+                if (this.isComplete(promo)) break
+
+                const unchangedNearCompletion = nearCompletion
+                    && !promo.complete
+                    && promo.progress === previous.progress
+                if (unchangedNearCompletion) {
+                    const confirmation = await this.confirmNearCompletion(tag, previous, promo)
+                    promo = confirmation.promotion
+                    if (confirmation.changed) {
+                        this.log('Search promotion changed during near-cap confirmation; stopping', 'warn')
+                        break
+                    }
+                    if (this.isComplete(promo)) break
+                    if (confirmation.stale) {
+                        this.log('Near-cap DAPI progress remains stale; stopping without another search delay', 'warn')
+                        break
+                    }
+                }
             }
 
-            if (promo.progress < promo.max) {
-                await this.bot.utils.wait(this.delay.calculateSearchDelay(count, this.bot.isMobile))
+            if (this.isComplete(promo)) break
+            if (consecutiveFailures >= 3) {
+                this.log('Three consecutive browser search failures; stopping', 'warn')
+                break
             }
+
+            await this.bot.utils.wait(this.delay.calculateSearchDelay(count, this.bot.isMobile))
         }
 
         const gained = Math.max(0, promo.progress - startProgress)
-        this.log(`Search finished: ${promo.progress}/${promo.max} (+${gained} this run, ${count} searches)`, 'log', 'green')
+        this.log(`Search finished: ${promo.progress}/${promo.max} (+${gained} this run, ${successfulSearches}/${count} successful searches)`, 'log', 'green')
         return { gained }
+    }
+
+    private isComplete(promotion: ApiPromotion): boolean {
+        return promotion.complete || promotion.progress >= promotion.max
+    }
+
+    private remainingPoints(promotion: ApiPromotion): number | null {
+        if (promotion.max <= 0) return null
+        return Math.max(0, promotion.max - promotion.progress)
+    }
+
+    private promotionChanged(previous: ApiPromotion, updated: ApiPromotion): boolean {
+        if (previous.offerId !== updated.offerId) return true
+        if (previous.dailySetDate !== updated.dailySetDate) return true
+        if (previous.max !== updated.max) return true
+        return false
+    }
+
+    private async confirmNearCompletion(
+        tag: string,
+        previous: ApiPromotion,
+        first: ApiPromotion
+    ): Promise<{ promotion: ApiPromotion; stale: boolean; changed: boolean }> {
+        let candidate = first
+        for (const backoff of [2000, 4000, 8000]) {
+            await this.bot.utils.wait(backoff)
+            let updated: ApiPromotion | undefined
+            try {
+                updated = await this.findSearchPromotion(tag)
+            } catch (error) {
+                this.log(`Near-cap confirmation ${tag} request failed: ${error}`, 'warn')
+                continue
+            }
+            if (!updated) continue
+            if (this.promotionChanged(previous, updated)) {
+                return { promotion: updated, stale: false, changed: true }
+            }
+            candidate = updated
+            if (this.isComplete(updated) || updated.progress !== previous.progress) {
+                return { promotion: updated, stale: false, changed: false }
+            }
+        }
+        return { promotion: candidate, stale: true, changed: false }
     }
 
     private async findSearchPromotion(tag: string): Promise<ApiPromotion | undefined> {
@@ -103,7 +209,7 @@ export class SearchRunner {
             || data.promotions.find(p => p.type === 'search')
     }
 
-    private async searchOnce(query: string): Promise<void> {
+    private async searchOnce(query: string): Promise<boolean> {
         const box = await this.page.waitForSelector('#sb_form_q, textarea[name="q"], input[name="q"]', { state: 'visible', timeout: 10000 }).catch(() => null)
         if (box) {
             await box.click().catch(() => {})
@@ -113,12 +219,20 @@ export class SearchRunner {
             await this.human.humanType(this.page, query)
             await this.bot.utils.wait(this.bot.utils.randomNumber(300, 1200))
             await this.page.keyboard.press('Enter')
+            const reachedResults = await this.page.waitForURL(url =>
+                url.hostname.endsWith('bing.com')
+                && url.pathname.includes('/search')
+                && url.searchParams.has('q'),
+            { timeout: 15000 }).then(() => true).catch(() => false)
+            if (!reachedResults) return false
         } else {
             // Fallback: direct query URL
-            await this.page.goto(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
+            const response = await this.page.goto(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null)
+            if (!response) return false
         }
         await this.page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
         await this.browseResults()
+        return true
     }
 
     /**

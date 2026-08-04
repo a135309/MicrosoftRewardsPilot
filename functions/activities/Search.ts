@@ -2,7 +2,7 @@ import {Page} from 'rebrowser-playwright'
 import {platform} from 'os'
 
 import {Workers} from '../Workers'
-import {IntelligentDelaySystem} from '../../src/anti-detection/intelligent-delay'
+import {IntelligentDelaySystem, normalizeSearchDelayConfig} from '../../src/anti-detection/intelligent-delay'
 import {ContextualSearchGenerator} from '../../src/anti-detection/contextual-search'
 import {HumanBehaviorSimulator} from '../../src/anti-detection/human-behavior'
 import {SessionManager} from '../../src/anti-detection/session-manager'
@@ -64,7 +64,6 @@ export class Search extends Workers {
     private bingHome = 'https://bing.com'
     private searchPageURL = ''
     private consecutiveFailures = 0
-    private adaptiveDelayMultiplier = 1.0
 
     // 反检测系统实例
     private intelligentDelay: IntelligentDelaySystem
@@ -74,7 +73,9 @@ export class Search extends Workers {
 
     constructor(bot: any) {
         super(bot)
-        this.intelligentDelay = new IntelligentDelaySystem()
+        this.intelligentDelay = new IntelligentDelaySystem(
+            normalizeSearchDelayConfig(bot.config?.searchSettings?.searchDelay)
+        )
         this.contextualSearch = new ContextualSearchGenerator()
         this.humanBehavior = new HumanBehaviorSimulator()
         this.sessionManager = new SessionManager({
@@ -349,10 +350,6 @@ export class Search extends Workers {
                 maxLoop = 0 // Reset to 0 so we can retry with related searches below
                 break
             }
-
-            // 智能延迟计算
-            const smartDelay = await this.getSmartSearchDelay()
-            await this.bot.utils.wait(smartDelay)
 
             // 移动端特殊检测：检查是否需要User-Agent刷新
             if (this.bot.isMobile && maxLoop === 3) {
@@ -1433,26 +1430,10 @@ export class Search extends Workers {
      * 智能延迟计算系统 - 使用新的反检测延迟系统
      */
     private async calculateSmartDelay(searchIndex: number): Promise<number> {
-        // 使用新的智能延迟系统
-        const hasFailures = this.consecutiveFailures > 0
-        const delay = this.intelligentDelay.calculateSearchDelay(searchIndex, this.bot.isMobile, hasFailures)
-
-        // 记录延迟调整信息
-        if (this.consecutiveFailures > 0) {
-            this.bot.log(this.bot.isMobile, 'SEARCH-ADAPTIVE-DELAY',
-                `Adjusted delay due to ${this.consecutiveFailures} consecutive failures: ${Math.round(delay / 1000)}s`)
-        }
+        const delay = this.intelligentDelay.calculateSearchDelay(searchIndex, this.bot.isMobile)
 
         // 记录搜索到会话管理器
         this.sessionManager.recordSearch()
-
-        // 检查是否需要会话中断
-        const interruption = this.sessionManager.simulateLifeInterruption()
-        if (interruption.shouldInterrupt) {
-            this.bot.log(this.bot.isMobile, 'SEARCH-LIFE-INTERRUPTION',
-                `Life interruption: ${interruption.reason} (${Math.round(interruption.duration / 1000)}s)`)
-            return delay + interruption.duration
-        }
 
         return delay
     }
@@ -1462,7 +1443,6 @@ export class Search extends Workers {
      */
     private handleSearchFailure(): void {
         this.consecutiveFailures++
-        this.adaptiveDelayMultiplier = Math.min(2.0, this.adaptiveDelayMultiplier + 0.2)
     }
 
     /**
@@ -1470,9 +1450,6 @@ export class Search extends Workers {
      */
     private handleSearchSuccess(): void {
         this.consecutiveFailures = 0
-        if (this.adaptiveDelayMultiplier > 1.0) {
-            this.adaptiveDelayMultiplier = Math.max(1.0, this.adaptiveDelayMultiplier - 0.1)
-        }
     }
 
     /**
@@ -1892,32 +1869,6 @@ export class Search extends Workers {
 
             return genericMissing + edgeMissing
         }
-    }
-
-    /**
-     * 智能调整搜索延迟
-     */
-    private async getSmartSearchDelay(): Promise<number> {
-        const baseMin = this.bot.isMobile ? 60000 : 45000 // 移动端60s，桌面端45s
-        const baseMax = this.bot.isMobile ? 150000 : 120000 // 移动端150s，桌面端120s
-
-        // 根据连续失败次数调整延迟
-        const failureMultiplier = Math.min(1 + (this.consecutiveFailures * 0.5), 3) // 最多3倍延迟
-
-        // 根据自适应倍数调整
-        const adaptiveMultiplier = this.adaptiveDelayMultiplier
-
-        const adjustedMin = baseMin * failureMultiplier * adaptiveMultiplier
-        const adjustedMax = baseMax * failureMultiplier * adaptiveMultiplier
-
-        const delay = Math.floor(Math.random() * (adjustedMax - adjustedMin + 1)) + adjustedMin
-
-        if (failureMultiplier > 1 || adaptiveMultiplier > 1) {
-            this.bot.log(this.bot.isMobile, 'SEARCH-SMART-DELAY',
-                `Smart delay: ${Math.round(delay / 1000)}s (base: ${Math.round(baseMin / 1000)}-${Math.round(baseMax / 1000)}s, failure multiplier: ${failureMultiplier.toFixed(1)}, adaptive: ${adaptiveMultiplier.toFixed(1)})`)
-        }
-
-        return delay
     }
 
     /**

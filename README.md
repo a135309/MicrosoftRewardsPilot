@@ -105,23 +105,31 @@ services:
 ```json
 {
   "headless": true,           // 无头模式运行
-  "parallel": true,           // 并行执行任务
+  "parallel": false,          // 顺序执行，降低内存峰值
   "clusters": 1,              // 集群数量
   "globalTimeout": "45min",   // 全局超时时间
   "runOnZeroPoints": false,   // 零积分时不运行
   "accountDelay": {           // 多账户间隔时间
     "min": "5min",            // 最小间隔5分钟
-    "max": "15min"            // 最大间隔15分钟
+    "max": "8min"             // 最大间隔8分钟
   }
 }
 ```
 
 ### 智能搜索配置
 > 搜索间隔（对数正态延迟）与拟人打字均为内置；查询语言按账户市场自动本地化（ja/en/zh-CN/vi 有完整查询库）。可调键：
+> 旧版扁平 `{ "min", "max" }` 结构只会触发弃用警告并使用新默认值；请按下方结构显式迁移。
 ```json
 {
   "searchSettings": {
     "useGeoLocaleQueries": true,    // 仅影响请求头 X-Rewards-Country/Language
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,              // 多语言支持
       "autoDetectLocation": true    // 自动检测位置（决定查询与时区本地化）
@@ -140,7 +148,8 @@ services:
   "workers": {
     "doDesktopSearch": true,   // 桌面端搜索
     "doMobileSearch": false,   // 已停用：与桌面端共享搜索积分上限
-    "doMorePromotions": true   // Explore on Bing / 推广任务
+    "doMorePromotions": true,  // Explore on Bing / 推广任务
+    "doClaimablePoints": true  // 搜索后领取 dashboard 待领取积分
   }
 }
 ```
@@ -364,16 +373,24 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "workers": {
     "doDesktopSearch": true,
     "doMobileSearch": false,
-    "doMorePromotions": true
+    "doMorePromotions": true,
+    "doClaimablePoints": true
   },
   "searchOnBingLocalQueries": true,
   "globalTimeout": "180min",
   "accountDelay": {
-    "min": "8min",
-    "max": "20min"
+    "min": "5min",
+    "max": "8min"
   },
   "searchSettings": {
     "useGeoLocaleQueries": true,
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,
       "autoDetectLocation": true

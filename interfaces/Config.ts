@@ -31,7 +31,7 @@ export interface ConfigSearchSettings {
     useGeoLocaleQueries: boolean;
     scrollRandomResults: boolean;
     clickRandomResults: boolean;
-    searchDelay: ConfigSearchDelay;
+    searchDelay?: ConfigSearchDelay | ConfigLegacySearchDelay;
     retryMobileSearchAmount: number;
     multiLanguage?: ConfigMultiLanguage;
     autoTimezone?: ConfigAutoTimezone;
@@ -52,7 +52,23 @@ export interface ConfigAutoTimezone {
     logChanges: boolean;
 }
 
+export type ConfigDuration = number | string;
+
+export interface ConfigSearchDelayRange {
+    min: ConfigDuration;
+    max: ConfigDuration;
+}
+
 export interface ConfigSearchDelay {
+    desktop: ConfigSearchDelayRange;
+    mobile: ConfigSearchDelayRange;
+    longPauseProbability: number;
+    longPause: ConfigSearchDelayRange;
+    hardMax: ConfigDuration;
+}
+
+/** Legacy flat shape. Accepted only for deprecation detection and migration warnings. */
+export interface ConfigLegacySearchDelay {
     min: number | string;
     max: number | string;
 }

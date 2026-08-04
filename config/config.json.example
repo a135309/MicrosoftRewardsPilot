@@ -36,16 +36,28 @@
     "searchOnBingLocalQueries": true,
     "globalTimeout": "180min",
     "accountDelay": {
-        "min": "8min",
-        "max": "20min"
+        "min": "5min",
+        "max": "8min"
     },
     "searchSettings": {
         "useGeoLocaleQueries": true,
         "scrollRandomResults": true,
         "clickRandomResults": true,
         "searchDelay": {
-            "min": "180s",
-            "max": "360s"
+            "desktop": {
+                "min": "25s",
+                "max": "60s"
+            },
+            "mobile": {
+                "min": "20s",
+                "max": "45s"
+            },
+            "longPauseProbability": 0.01,
+            "longPause": {
+                "min": "60s",
+                "max": "120s"
+            },
+            "hardMax": "120s"
         },
         "retryMobileSearchAmount": 0,
         "multiLanguage": {
