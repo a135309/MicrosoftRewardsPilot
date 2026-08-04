@@ -1,183 +1,161 @@
-/**
- * 智能延迟系统
- * 基于真实用户行为模式的非模式化延迟生成
- *
- * 核心是一次对数正态(log-normal)抽样：人类两次操作的间隔本就是右偏、长尾的分布——大多数较短、
- * 偶有很长的停顿。相比此前“分段均匀 + 多模式加权”的写法，对数正态没有可被检测的区间硬边界。
- * 抽样之后再叠加：生活中断、时间感知、会话疲劳，并对单次延迟封顶。
- */
-export class IntelligentDelaySystem {
-    // 单次延迟上限，避免生活中断与多个倍率叠加后出现 >1 小时的极端等待
-    private static readonly MAX_SEARCH_DELAY_MS = 10 * 60_000
-    private lastActivityTime: number = 0
-    private sessionStartTime: number = Date.now()
-    private consecutiveFailures: number = 0
+import ms from 'ms'
 
-    /**
-     * 计算搜索延迟
-     */
-    calculateSearchDelay(searchIndex: number, isMobile: boolean, hasFailures: boolean = false): number {
-        const now = Date.now()
+export interface SearchDelayRangeMs {
+    min: number
+    max: number
+}
 
-        // 如果有失败，增加谨慎度；否则缓慢回落
-        if (hasFailures) {
-            this.consecutiveFailures++
-        } else {
-            this.consecutiveFailures = Math.max(0, this.consecutiveFailures - 1)
-        }
+export interface NormalizedSearchDelayConfig {
+    desktop: SearchDelayRangeMs
+    mobile: SearchDelayRangeMs
+    longPauseProbability: number
+    longPause: SearchDelayRangeMs
+    hardMax: number
+}
 
-        // 基础延迟范围（基于真实用户行为统计）
-        const baseRanges = {
-            mobile: { min: 18000, max: 95000 },    // 18秒-95秒
-            desktop: { min: 25000, max: 140000 }   // 25秒-140秒
-        }
+const DEFAULT_SEARCH_DELAY_CONFIG: NormalizedSearchDelayConfig = {
+    desktop: { min: 25_000, max: 60_000 },
+    mobile: { min: 20_000, max: 45_000 },
+    longPauseProbability: 0.01,
+    longPause: { min: 60_000, max: 120_000 },
+    hardMax: 120_000
+}
 
-        const range = isMobile ? baseRanges.mobile : baseRanges.desktop
+export function getDefaultSearchDelayConfig(): NormalizedSearchDelayConfig {
+    return {
+        desktop: { ...DEFAULT_SEARCH_DELAY_CONFIG.desktop },
+        mobile: { ...DEFAULT_SEARCH_DELAY_CONFIG.mobile },
+        longPauseProbability: DEFAULT_SEARCH_DELAY_CONFIG.longPauseProbability,
+        longPause: { ...DEFAULT_SEARCH_DELAY_CONFIG.longPause },
+        hardMax: DEFAULT_SEARCH_DELAY_CONFIG.hardMax
+    }
+}
 
-        // 对数正态抽样（右偏长尾，无区间硬边界）
-        let delay = this.logNormalDelay(range.min, range.max)
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
-        // 连续失败时更谨慎（拉长间隔）
-        if (this.consecutiveFailures > 0) {
-            const cautionMultiplier = 1.3 + (this.consecutiveFailures * 0.2)
-            delay *= cautionMultiplier
-        }
+function parseDuration(value: unknown, label: string): number {
+    const parsed = typeof value === 'number'
+        ? value
+        : typeof value === 'string' && value.trim().length > 0
+            ? ms(value)
+            : Number.NaN
 
-        // 添加生活中断模拟
-        delay = this.addLifeInterruptions(delay)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`${label} must be a positive duration`)
+    }
+    return parsed
+}
 
-        // 时间感知调整
-        delay = this.applyTimeAwareAdjustment(delay)
-
-        // 会话疲劳效应
-        delay = this.applySessionFatigue(delay, searchIndex)
-
-        // 封顶单次延迟，避免极端等待拖垮运行时间预算
-        delay = Math.min(delay, IntelligentDelaySystem.MAX_SEARCH_DELAY_MS)
-
-        this.lastActivityTime = now
-
-        return Math.floor(delay)
+function parseRange(value: unknown, label: string): SearchDelayRangeMs {
+    if (!isRecord(value)) {
+        throw new Error(`${label} must contain min and max durations`)
     }
 
-    /**
-     * 对数正态延迟：中位数约落在区间的 30% 处，向上有长尾，向下不低于 min。
-     * 用 Box-Muller 生成标准正态，再取指数得到右偏分布。
-     */
+    const min = parseDuration(value.min, `${label}.min`)
+    const max = parseDuration(value.max, `${label}.max`)
+    if (min > max) {
+        throw new Error(`${label}.min must be less than or equal to ${label}.max`)
+    }
+    return { min, max }
+}
+
+/** Normalize current delay settings and reject ambiguous or unsafe values. */
+export function normalizeSearchDelayConfig(
+    raw: unknown,
+    warn: (message: string) => void = message => console.warn(message)
+): NormalizedSearchDelayConfig {
+    if (raw === undefined || raw === null) {
+        return getDefaultSearchDelayConfig()
+    }
+
+    if (!isRecord(raw)) {
+        throw new Error('searchSettings.searchDelay must be an object')
+    }
+
+    const keys = Object.keys(raw)
+    const isExactLegacyShape = keys.length === 2 && keys.includes('min') && keys.includes('max')
+    if (isExactLegacyShape) {
+        warn('[CONFIG] Legacy searchSettings.searchDelay {min,max} is deprecated; using new search-delay defaults')
+        return getDefaultSearchDelayConfig()
+    }
+    if ('min' in raw || 'max' in raw) {
+        throw new Error('searchSettings.searchDelay mixes legacy and current fields; migrate to the current shape')
+    }
+
+    const desktop = parseRange(raw.desktop, 'searchSettings.searchDelay.desktop')
+    const mobile = parseRange(raw.mobile, 'searchSettings.searchDelay.mobile')
+    const longPause = parseRange(raw.longPause, 'searchSettings.searchDelay.longPause')
+    const probability = raw.longPauseProbability
+    if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+        throw new Error('searchSettings.searchDelay.longPauseProbability must be a number between 0 and 1')
+    }
+    const hardMax = parseDuration(raw.hardMax, 'searchSettings.searchDelay.hardMax')
+    if (hardMax < Math.max(desktop.min, mobile.min, longPause.min)) {
+        throw new Error('searchSettings.searchDelay.hardMax must be greater than or equal to all configured minima')
+    }
+
+    return { desktop, mobile, longPauseProbability: probability, longPause, hardMax }
+}
+
+/**
+ * Bounded log-normal search spacing. Long pauses replace normal samples; all results are capped last.
+ */
+export class IntelligentDelaySystem {
+    private lastActivityTime = 0
+    private sessionStartTime = Date.now()
+
+    constructor(
+        private readonly settings: NormalizedSearchDelayConfig = getDefaultSearchDelayConfig(),
+        private readonly rng: () => number = Math.random
+    ) {}
+
+    calculateSearchDelay(_searchIndex: number, isMobile: boolean, _hasFailures = false): number {
+        const now = Date.now()
+        const range = isMobile ? this.settings.mobile : this.settings.desktop
+
+        let delay: number
+        if (this.randomUnit() < this.settings.longPauseProbability) {
+            delay = this.randomInclusive(this.settings.longPause.min, this.settings.longPause.max)
+        } else {
+            delay = this.logNormalDelay(range.min, range.max)
+        }
+
+        this.lastActivityTime = now
+        return Math.floor(Math.min(delay, this.settings.hardMax))
+    }
+
+    private randomUnit(): number {
+        const value = this.rng()
+        if (!Number.isFinite(value)) return 0
+        return Math.min(0.999999999, Math.max(0, value))
+    }
+
+    private randomInclusive(min: number, max: number): number {
+        return Math.floor(min + this.randomUnit() * (max - min + 1))
+    }
+
     private logNormalDelay(min: number, max: number): number {
         const span = max - min
-        const u1 = Math.max(1e-9, Math.random())
-        const u2 = Math.random()
+        if (span <= 0) return min
+
+        const u1 = Math.max(1e-9, this.randomUnit())
+        const u2 = this.randomUnit()
         const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
-        const sigma = 0.6
-        const sample = Math.exp(sigma * z) // 中位数为 1，典型范围约 [0.4, 2.5]，偶有更大值
+        const sample = Math.exp(0.6 * z)
         const scaled = min + span * 0.3 * sample
         return Math.max(min, Math.min(max, scaled))
     }
 
-    /**
-     * 添加生活中断模拟
-     */
-    private addLifeInterruptions(baseDelay: number): number {
-        const random = Math.random()
-
-        // 5%概率的长时间中断（接电话、上厕所、吃东西等）
-        if (random < 0.05) {
-            const interruptionTypes = [
-                { min: 120000, max: 300000 },  // 2-5分钟：短暂离开
-                { min: 300000, max: 900000 },  // 5-15分钟：接电话
-                { min: 600000, max: 1800000 }  // 10-30分钟：吃饭/休息
-            ]
-            const interruption = interruptionTypes[Math.floor(Math.random() * interruptionTypes.length)]
-            const interruptionTime = (interruption?.min || 100) + Math.random() * ((interruption?.max || 500) - (interruption?.min || 100))
-            return baseDelay + interruptionTime
-        }
-
-        // 15%概率的短时间中断（查看通知、回复消息等）
-        if (random < 0.20) {
-            const shortInterruption = 8000 + Math.random() * 25000 // 8-33秒
-            return baseDelay + shortInterruption
-        }
-
-        // 10%概率的微中断（思考、阅读等）
-        if (random < 0.30) {
-            const microInterruption = 3000 + Math.random() * 8000 // 3-11秒
-            return baseDelay + microInterruption
-        }
-
-        return baseDelay
-    }
-
-    /**
-     * 时间感知调整
-     */
-    private applyTimeAwareAdjustment(delay: number): number {
-        const hour = new Date().getHours()
-        const dayOfWeek = new Date().getDay()
-
-        let multiplier = 1.0
-
-        // 深夜时间（1-6点）- 用户更慢更谨慎
-        if (hour >= 1 && hour <= 6) {
-            multiplier *= 1.6 + Math.random() * 0.4
-        }
-        // 早晨忙碌时间（7-9点）- 用户可能更快
-        else if (hour >= 7 && hour <= 9) {
-            multiplier *= 0.7 + Math.random() * 0.3
-        }
-        // 工作时间（9-17点）- 用户可能分心
-        else if (hour >= 9 && hour <= 17) {
-            multiplier *= 0.8 + Math.random() * 0.4
-        }
-        // 晚上黄金时间（19-23点）- 正常使用
-        else if (hour >= 19 && hour <= 23) {
-            multiplier *= 0.9 + Math.random() * 0.3
-        }
-
-        // 周末调整
-        if (dayOfWeek === 0 || dayOfWeek === 6) {
-            multiplier *= 1.1 + Math.random() * 0.2 // 周末更悠闲
-        }
-
-        return delay * multiplier
-    }
-
-    /**
-     * 会话疲劳效应
-     */
-    private applySessionFatigue(delay: number, searchIndex: number): number {
-        const sessionDuration = Date.now() - this.sessionStartTime
-        const sessionMinutes = sessionDuration / 60000
-
-        // 会话时间越长，用户越疲劳
-        let fatigueMultiplier = 1.0
-
-        if (sessionMinutes > 10) {
-            fatigueMultiplier += (sessionMinutes - 10) * 0.02 // 每分钟增加2%延迟
-        }
-
-        // 搜索次数疲劳
-        if (searchIndex > 10) {
-            fatigueMultiplier += (searchIndex - 10) * 0.01 // 每次搜索增加1%延迟
-        }
-
-        return delay * Math.min(fatigueMultiplier, 2.0) // 最多2倍延迟
-    }
-
-    /**
-     * 重置会话
-     */
     resetSession(): void {
         this.sessionStartTime = Date.now()
-        this.consecutiveFailures = 0
+        this.lastActivityTime = 0
     }
 
-    /**
-     * 获取当前状态
-     */
     getStatus(): { consecutiveFailures: number; sessionDuration: number; lastActivityTime: number } {
         return {
-            consecutiveFailures: this.consecutiveFailures,
+            consecutiveFailures: 0,
             sessionDuration: Date.now() - this.sessionStartTime,
             lastActivityTime: this.lastActivityTime
         }

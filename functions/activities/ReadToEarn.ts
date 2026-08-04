@@ -6,6 +6,8 @@ import { Workers } from '../Workers'
 import { DashboardData } from '../../interfaces/DashboardData'
 import { GeoLanguageDetector } from '../../utils/GeoLanguage'
 
+const READ_TO_EARN_DELAY_MIN_MS = 180_000
+const READ_TO_EARN_DELAY_MAX_MS = 360_000
 
 export class ReadToEarn extends Workers {
     public async doReadToEarn(accessToken: string, data: DashboardData) {
@@ -62,7 +64,7 @@ export class ReadToEarn extends Workers {
                 } else {
                     this.bot.log(this.bot.isMobile, 'READ-TO-EARN', `Read article ${i + 1} of ${articleCount} max | Gained ${newBalance - userBalance} Points`)
                     userBalance = newBalance
-                    await this.bot.utils.wait(Math.floor(this.bot.utils.randomNumber(this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min), this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max))))
+                    await this.bot.utils.wait(this.bot.utils.randomNumber(READ_TO_EARN_DELAY_MIN_MS, READ_TO_EARN_DELAY_MAX_MS))
                 }
             }
 

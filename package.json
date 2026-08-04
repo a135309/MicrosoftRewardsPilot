@@ -9,6 +9,7 @@
   "scripts": {
     "pre-build": "npm i && rimraf dist && npx playwright install chromium",
     "build": "tsc",
+    "test:search": "ts-node tests/search-optimization.test.ts",
     "start": "node ./dist/src/index.js",
     "ts-start": "ts-node ./src/index.ts",
     "dev": "ts-node ./src/index.ts -dev",

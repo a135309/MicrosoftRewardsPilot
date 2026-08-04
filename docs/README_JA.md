@@ -105,23 +105,31 @@ services:
 ```json
 {
   "headless": true,           // ヘッドレスモードで実行
-  "parallel": true,           // タスクを並列実行
+  "parallel": false,          // メモリ使用量を抑えて順次実行
   "clusters": 1,              // クラスター数
   "globalTimeout": "45min",   // グローバルタイムアウト時間
   "runOnZeroPoints": false,   // ゼロポイント時は実行しない
   "accountDelay": {           // アカウント間の遅延時間
     "min": "5min",            // 最小間隔5分
-    "max": "15min"            // 最大間隔15分
+    "max": "8min"             // 最大間隔8分
   }
 }
 ```
 
 ### スマート検索設定
 > 検索間隔（対数正規分布の遅延）と人間らしいタイピングは内蔵されています。クエリ言語はアカウントの市場に応じて自動的にローカライズされます（ja/en/zh-CN/vi には完全なクエリ集が用意されています）。調整可能なキー：
+> 旧式のフラットな `{ "min", "max" }` 形式は非推奨警告後に新デフォルトを使います。下記形式へ明示的に移行してください。
 ```json
 {
   "searchSettings": {
     "useGeoLocaleQueries": true,    // リクエストヘッダー X-Rewards-Country/Language にのみ影響
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,              // 多言語サポート
       "autoDetectLocation": true    // 位置自動検出（クエリとタイムゾーンのローカライズを決定）
@@ -367,11 +375,18 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "searchOnBingLocalQueries": true,
   "globalTimeout": "180min",
   "accountDelay": {
-    "min": "8min",
-    "max": "20min"
+    "min": "5min",
+    "max": "8min"
   },
   "searchSettings": {
     "useGeoLocaleQueries": true,
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,
       "autoDetectLocation": true
@@ -441,4 +456,4 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 
 *このプロジェクトがお役に立ちましたら、スターをお願いします！*
 
-</div> 
+</div>

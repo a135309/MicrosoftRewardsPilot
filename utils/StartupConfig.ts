@@ -1,6 +1,7 @@
 import { GeoLanguageDetector } from './GeoLanguage'
 import { log } from './Logger'
 import { loadConfig } from './Load'
+import { normalizeSearchDelayConfig } from '../src/anti-detection/intelligent-delay'
 
 // 定义自动时区配置接口
 interface AutoTimezoneConfig {
@@ -45,7 +46,15 @@ export class StartupConfig {
             
             // 加载配置文件
             const config = loadConfig()
-            
+
+            const validation = this.validateConfiguration()
+            for (const issue of validation.issues) {
+                log(false, 'STARTUP-CONFIG', issue, 'warn')
+            }
+            if (!validation.isValid) {
+                throw new Error(`Invalid configuration: ${validation.issues.join('; ')}`)
+            }
+
             // 1. 自动时区设置
             if (config.searchSettings?.autoTimezone?.enabled) {
                 await this.initializeTimezone(config.searchSettings.autoTimezone)
@@ -60,6 +69,7 @@ export class StartupConfig {
             
         } catch (error) {
             log(false, 'STARTUP-CONFIG', `Error during startup configuration: ${error}`, 'warn')
+            throw error
         }
     }
 
@@ -238,6 +248,12 @@ export class StartupConfig {
             // 检查搜索延迟设置
             if (!config.searchSettings?.searchDelay) {
                 suggestions.push('建议配置 searchSettings.searchDelay 以优化搜索速度')
+            } else {
+                try {
+                    normalizeSearchDelayConfig(config.searchSettings.searchDelay)
+                } catch (error) {
+                    issues.push(`searchSettings.searchDelay 配置无效: ${error instanceof Error ? error.message : String(error)}`)
+                }
             }
             
             const isValid = issues.length === 0
@@ -252,4 +268,4 @@ export class StartupConfig {
             }
         }
     }
-} 
+}

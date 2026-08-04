@@ -105,23 +105,31 @@ services:
 ```json
 {
   "headless": true,           // Run in headless mode
-  "parallel": true,           // Execute tasks in parallel
+  "parallel": false,          // Run tasks sequentially to limit memory
   "clusters": 1,              // Number of clusters
   "globalTimeout": "45min",   // Global timeout duration
   "runOnZeroPoints": false,   // Don't run when zero points available
   "accountDelay": {           // Delay between accounts
     "min": "5min",            // Minimum delay 5 minutes
-    "max": "15min"            // Maximum delay 15 minutes
+    "max": "8min"             // Maximum delay 8 minutes
   }
 }
 ```
 
 ### Smart Search Configuration
 > Search spacing (log-normal delay) and human-like typing are built in; query language auto-localizes per account market (full query banks for ja/en/zh-CN/vi). Tunable keys:
+> The legacy flat `{ "min", "max" }` shape only emits a deprecation warning and uses new defaults; migrate explicitly to the structure below.
 ```json
 {
   "searchSettings": {
     "useGeoLocaleQueries": true,    // Only affects the X-Rewards-Country/Language headers
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,              // Multi-language support
       "autoDetectLocation": true    // Auto-detect location (drives query & timezone localization)
@@ -140,7 +148,8 @@ services:
   "workers": {
     "doDesktopSearch": true,   // Desktop search
     "doMobileSearch": false,   // Disabled: shares the search-points cap with desktop
-    "doMorePromotions": true   // Explore on Bing / promotional tasks
+    "doMorePromotions": true,  // Explore on Bing / promotional tasks
+    "doClaimablePoints": true  // Claim dashboard Ready-to-claim points after search
   }
 }
 ```
@@ -362,16 +371,24 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
   "workers": {
     "doDesktopSearch": true,
     "doMobileSearch": false,
-    "doMorePromotions": true
+    "doMorePromotions": true,
+    "doClaimablePoints": true
   },
   "searchOnBingLocalQueries": true,
   "globalTimeout": "180min",
   "accountDelay": {
-    "min": "8min",
-    "max": "20min"
+    "min": "5min",
+    "max": "8min"
   },
   "searchSettings": {
     "useGeoLocaleQueries": true,
+    "searchDelay": {
+      "desktop": { "min": "25s", "max": "60s" },
+      "mobile": { "min": "20s", "max": "45s" },
+      "longPauseProbability": 0.01,
+      "longPause": { "min": "60s", "max": "120s" },
+      "hardMax": "120s"
+    },
     "multiLanguage": {
       "enabled": true,
       "autoDetectLocation": true
@@ -441,4 +458,4 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 
 *If this project helps you, please consider giving it a Star!*
 
-</div> 
+</div>

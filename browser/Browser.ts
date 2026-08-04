@@ -207,8 +207,6 @@ class Browser {
                 // 保留必要的稳定性参数
                 '--no-first-run',
                 '--disable-gpu',
-                '--memory-pressure-off',
-                '--max_old_space_size=4096',
                 '--password-store=basic'
                 // NOTE: removed the malformed/contradictory switches that previously lived here
                 // (--exclude-switches=enable-automation, --disable-automation, --enable-automation=false,
