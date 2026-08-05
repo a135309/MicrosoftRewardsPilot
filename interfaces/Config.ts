@@ -2,6 +2,7 @@ export interface Config {
     baseURL: string;
     sessionPath: string;
     headless: boolean;
+    forceRelogin?: boolean;
     parallel: boolean;
     runOnZeroPoints: boolean;
     clusters: number;

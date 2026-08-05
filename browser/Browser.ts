@@ -215,7 +215,19 @@ class Browser {
             ]
         })
 
-        const sessionData = await loadSessionData(this.bot.config.sessionPath, email, this.bot.isMobile, this.bot.config.saveFingerprint)
+        const forceRelogin = this.bot.config.forceRelogin === true
+        const sessionData = await loadSessionData(
+            this.bot.config.sessionPath,
+            email,
+            this.bot.isMobile,
+            this.bot.config.saveFingerprint,
+            forceRelogin
+        )
+        this.bot.log(
+            this.bot.isMobile,
+            'BROWSER-SESSION',
+            `Session URL base: ${this.bot.config.baseURL} | forceRelogin: ${forceRelogin} | cookies loaded: ${sessionData.cookies.length}`
+        )
 
         const fingerprint = sessionData.fingerprint ? sessionData.fingerprint : await this.generateFingerprint()
 
