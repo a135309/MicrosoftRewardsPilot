@@ -2,6 +2,7 @@ import { GeoLanguageDetector } from './GeoLanguage'
 import { log } from './Logger'
 import { loadConfig } from './Load'
 import { normalizeSearchDelayConfig } from '../src/anti-detection/intelligent-delay'
+import { validateVisualSearchConfig } from '../src/visual-search/types'
 
 // 定义自动时区配置接口
 interface AutoTimezoneConfig {
@@ -255,6 +256,11 @@ export class StartupConfig {
                     issues.push(`searchSettings.searchDelay 配置无效: ${error instanceof Error ? error.message : String(error)}`)
                 }
             }
+
+            if (config.workers.doVisualSearch !== undefined && typeof config.workers.doVisualSearch !== 'boolean') {
+                issues.push('workers.doVisualSearch must be a boolean')
+            }
+            issues.push(...validateVisualSearchConfig(config.visualSearch))
             
             const isValid = issues.length === 0
             

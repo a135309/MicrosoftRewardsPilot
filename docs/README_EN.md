@@ -433,6 +433,12 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 
 ---
 
+## Visual Search
+
+Visual Search runs in two phases. Normal account work and Dashboard screening use direct Chromium. After direct sessions are saved, candidates run serially in short-lived Chromium instances using each account proxy. Proxy-phase cookies and fingerprints never replace direct-session data.
+
+Put non-sensitive JPEG, PNG, WebP, or GIF photos in `visual-search-images/`. Files are uploaded to Bing and excluded from Git and Docker build context by default. Completion requires both Dashboard card and drawer progress to advance and reach their maximum.
+
 ## Important Warnings
 
 <div align="center">

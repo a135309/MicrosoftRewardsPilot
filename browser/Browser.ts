@@ -18,6 +18,43 @@ export interface ManagedBrowser {
     isMobile: boolean
 }
 
+export type BrowserNetwork =
+    | { mode: 'direct' }
+    | { mode: 'proxy'; proxy: AccountProxy }
+
+export interface BrowserCreateOptions {
+    network: BrowserNetwork
+    ignoreForceRelogin?: boolean
+    persistFingerprint?: boolean
+    loadFingerprint?: boolean
+}
+
+const DIRECT_PROXY: AccountProxy = {
+    proxyAxios: false,
+    url: '',
+    port: 0,
+    username: '',
+    password: ''
+}
+
+export function validateBrowserNetwork(network: BrowserNetwork): void {
+    if (network.mode === 'direct') return
+
+    const { url, port } = network.proxy
+    let parsed: URL
+    try {
+        parsed = new URL(url)
+    } catch {
+        throw new Error('Visual Search proxy URL is invalid')
+    }
+    if (!['http:', 'https:', 'socks4:', 'socks5:'].includes(parsed.protocol) || !parsed.hostname) {
+        throw new Error('Visual Search proxy protocol or host is invalid')
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Visual Search proxy port is invalid')
+    }
+}
+
 // 定义浏览器上下文选项的类型
 interface BrowserContextOptions {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,7 +209,9 @@ class Browser {
         return languageHeaders[language] || 'en-US,en;q=0.9'
     }
 
-    async createBrowser(proxy: AccountProxy, email: string): Promise<ManagedBrowser> {
+    async createBrowser(options: BrowserCreateOptions, email: string): Promise<ManagedBrowser> {
+        validateBrowserNetwork(options.network)
+        const proxy = options.network.mode === 'proxy' ? options.network.proxy : DIRECT_PROXY
         // 获取地理位置配置
         const geoConfig = await this.getGeoLocationConfig(proxy)
 
@@ -182,7 +221,13 @@ class Browser {
         const browser = await chromium.launch({
             //channel: 'msedge', // Uses Edge instead of chrome
             headless: this.bot.config.headless,
-            ...(proxy.url && { proxy: { username: proxy.username, password: proxy.password, server: `${proxy.url}:${proxy.port}` } }),
+            ...(options.network.mode === 'proxy' && {
+                proxy: {
+                    username: proxy.username || undefined,
+                    password: proxy.password || undefined,
+                    server: `${proxy.url}:${proxy.port}`
+                }
+            }),
             args: [
                 // 基础安全参数（保留必要的）
                 '--no-sandbox',
@@ -215,12 +260,15 @@ class Browser {
             ]
         })
 
-        const forceRelogin = this.bot.config.forceRelogin === true
+        const forceRelogin = options.ignoreForceRelogin !== true && this.bot.config.forceRelogin === true
+        const fingerprintSettings = options.loadFingerprint
+            ? { desktop: true, mobile: true }
+            : this.bot.config.saveFingerprint
         const sessionData = await loadSessionData(
             this.bot.config.sessionPath,
             email,
             this.bot.isMobile,
-            this.bot.config.saveFingerprint,
+            fingerprintSettings,
             forceRelogin
         )
         this.bot.log(
@@ -282,7 +330,7 @@ class Browser {
 
         await context.addCookies(sessionData.cookies)
 
-        if (this.bot.config.saveFingerprint) {
+        if (options.persistFingerprint !== false && this.bot.config.saveFingerprint) {
             await saveFingerprintData(this.bot.config.sessionPath, email, this.bot.isMobile, fingerprint)
         }
 

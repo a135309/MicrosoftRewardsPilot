@@ -434,6 +434,22 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 </details>
 
 
+## 视觉搜索
+
+视觉搜索使用两阶段执行：普通任务阶段通过直连 Chromium 检查 Dashboard；所有候选账号完成普通任务并保存会话后，再通过各账号代理串行启动短生命周期 Chromium。代理阶段不会覆盖直连 cookies 或指纹。
+
+```json
+"workers": { "doVisualSearch": true },
+"visualSearch": {
+  "imageDirectory": "visual-search-images",
+  "taskTimeout": "3min",
+  "completionTimeout": "90s",
+  "maxUploadAttempts": 1
+}
+```
+
+将非敏感 JPEG、PNG、WebP 或 GIF 照片放入 `visual-search-images/`。文件会上传到 Bing；Git 与 Docker build context 默认排除真实图片。只有 Dashboard 卡片与抽屉进度同时增长并达到上限才确认完成。
+
 ## 重要提醒
 
 <div align="center">

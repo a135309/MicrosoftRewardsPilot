@@ -17,7 +17,14 @@
         "doDesktopSearch": true,
         "doMobileSearch": false,
         "doDailyCheckIn": true,
-        "doReadToEarn": true
+        "doReadToEarn": true,
+        "doVisualSearch": true
+    },
+    "visualSearch": {
+        "imageDirectory": "visual-search-images",
+        "taskTimeout": "3min",
+        "completionTimeout": "90s",
+        "maxUploadAttempts": 1
     },
     "popupHandling": {
         "enabled": false,

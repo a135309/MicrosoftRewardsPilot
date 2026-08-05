@@ -114,7 +114,7 @@ export class Login {
         })
     }
 
-    async login(page: Page, email: string, password: string) {
+    async login(page: Page, email: string, password: string, saveSession = true) {
 
         try {
             this.bot.log(this.bot.isMobile, 'LOGIN', 'Starting login process!')
@@ -160,10 +160,14 @@ export class Login {
             await this.checkBingLogin(page)
             await this.logLoginDiagnostics(page, 'Login completed')
 
-            await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile)
+            if (saveSession) {
+                await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile)
+            }
 
             // We're done logging in
-            this.bot.log(this.bot.isMobile, 'LOGIN', 'Logged in successfully, saved login session!')
+            this.bot.log(this.bot.isMobile, 'LOGIN', saveSession
+                ? 'Logged in successfully, saved login session!'
+                : 'Logged in successfully with read-only session mode')
 
         } catch (error) {
             // Throw and don't continue

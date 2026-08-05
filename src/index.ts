@@ -18,12 +18,39 @@ import { RewardsEarner } from './rewards-api/RewardsEarner'
 import { RewardsApi } from './rewards-api/RewardsApi'
 import { SearchRunner } from './rewards-api/SearchRunner'
 import { ExploreRunner } from './rewards-api/ExploreRunner'
-import { VisualSearchRunner } from './rewards-api/VisualSearchRunner'
+import { DashboardDetector } from './visual-search/DashboardDetector'
+import { ImageRepository } from './visual-search/ImageRepository'
+import { VisualSearchRunner } from './visual-search/VisualSearchRunner'
+import {
+    VisualSearchCandidate,
+    VisualSearchResult,
+    resolveVisualSearchConfig
+} from './visual-search/types'
 
-import { Account } from '../interfaces/Account'
+import { Account, AccountProxy } from '../interfaces/Account'
 import Axios from '../utils/Axios'
 import { StartupConfig } from '../utils/StartupConfig'
 import { LoginTimeoutError } from '../interfaces/Errors'
+
+const DIRECT_ACCOUNT_PROXY: AccountProxy = {
+    proxyAxios: false,
+    url: '',
+    port: 0,
+    username: '',
+    password: ''
+}
+
+interface NormalPhaseSummary {
+    candidates: VisualSearchCandidate[]
+    completedAccounts: number
+    failedAccounts: number
+    totalAccounts: number
+}
+
+interface NormalPhaseWorkerMessage {
+    type: 'normal-complete'
+    summary: NormalPhaseSummary
+}
 
 
 // Main bot class
@@ -42,6 +69,8 @@ export class MicrosoftRewardsBot {
     private activeWorkers: number
     private activeManagedBrowsers: Map<string, Set<ManagedBrowser>> = new Map()
     private spawnedInstances: MicrosoftRewardsBot[] = []
+    private workerNormalSummaries: NormalPhaseSummary[] = []
+    private workerStates: Map<number, { totalAccounts: number; reported: boolean }> = new Map()
     private browserFactory: Browser = new Browser(this)
     private accounts: Account[]
     private login = new Login(this)
@@ -102,17 +131,42 @@ export class MicrosoftRewardsBot {
         for (let i = 0; i < accountChunks.length; i++) {
             const worker = cluster.fork()
             const chunk = accountChunks[i]
-            worker.send({ chunk })
+            const workerId = worker.id
+            this.workerStates.set(workerId, { totalAccounts: chunk?.length ?? 0, reported: false })
+            worker.on('message', (message: NormalPhaseWorkerMessage) => {
+                if (message?.type !== 'normal-complete') return
+                this.workerNormalSummaries.push(message.summary)
+                const state = this.workerStates.get(workerId)
+                if (state) state.reported = true
+            })
+            worker.send({ emails: (chunk ?? []).map(account => account.email) })
         }
 
-        cluster.on('exit', (worker, code) => {
+        cluster.on('exit', async (worker, code) => {
             this.activeWorkers -= 1
+            const state = this.workerStates.get(worker.id)
+            if (state && !state.reported) {
+                this.workerNormalSummaries.push({
+                    candidates: [],
+                    completedAccounts: 0,
+                    failedAccounts: state.totalAccounts,
+                    totalAccounts: state.totalAccounts
+                })
+            }
+            this.workerStates.delete(worker.id)
 
             log('main', 'MAIN-WORKER', `Worker ${worker.process.pid} destroyed | Code: ${code} | Active workers: ${this.activeWorkers}`, 'warn')
 
             // Check if all workers have exited
             if (this.activeWorkers === 0) {
-                log('main', 'MAIN-WORKER', 'All workers destroyed. Exiting main process!', 'warn')
+                const normal = this.workerNormalSummaries.reduce<NormalPhaseSummary>((combined, summary) => ({
+                    candidates: [...combined.candidates, ...summary.candidates],
+                    completedAccounts: combined.completedAccounts + summary.completedAccounts,
+                    failedAccounts: combined.failedAccounts + summary.failedAccounts,
+                    totalAccounts: combined.totalAccounts + summary.totalAccounts
+                }), { candidates: [], completedAccounts: 0, failedAccounts: 0, totalAccounts: 0 })
+                const visual = await this.runVisualPhase(normal.candidates)
+                this.logSummary(normal, visual)
                 process.exit(0)
             }
         })
@@ -121,14 +175,16 @@ export class MicrosoftRewardsBot {
     private runWorker() {
         log('main', 'MAIN-WORKER', `Worker ${process.pid} spawned`)
         // Receive the chunk of accounts from the master
-        process.on('message', async ({ chunk }) => {
-            await this.runTasks(chunk)
+        process.on('message', async ({ emails }: { emails: string[] }) => {
+            const emailSet = new Set(emails)
+            await this.runTasks(this.accounts.filter(account => emailSet.has(account.email)))
         })
     }
 
     private async runTasks(accounts: Account[]) {
         let completedAccounts = 0
         let failedAccounts = 0
+        const candidates: VisualSearchCandidate[] = []
 
         // Randomise account order each run so accounts sharing an egress IP/proxy don't present a
         // stable processing sequence (and fixed inter-account time offsets) day after day.
@@ -163,7 +219,7 @@ export class MicrosoftRewardsBot {
                 let didTimeout = false
 
                 try {
-                    await Promise.race([
+                    const candidate = await Promise.race([
                         accountTask,
                         new Promise<never>((_, reject) => {
                             timeoutHandle = setTimeout(() => {
@@ -172,6 +228,7 @@ export class MicrosoftRewardsBot {
                             }, accountTimeout)
                         })
                     ])
+                    if (candidate) candidates.push(candidate)
                 } catch (error) {
                     if (didTimeout) {
                         log('main', 'MAIN-TIMEOUT', `Timeout reached for ${account.email}, closing active resources...`, 'warn')
@@ -249,6 +306,20 @@ export class MicrosoftRewardsBot {
         }
 
         // 报告最终结果
+        const normal: NormalPhaseSummary = {
+            candidates,
+            completedAccounts,
+            failedAccounts,
+            totalAccounts: accounts.length
+        }
+        if (cluster.isWorker && this.config.clusters > 1 && process.send) {
+            const message: NormalPhaseWorkerMessage = { type: 'normal-complete', summary: normal }
+            await new Promise<void>(resolve => process.send?.(message, () => resolve()))
+        } else {
+            const visual = await this.runVisualPhase(candidates)
+            this.logVisualSummary(visual)
+        }
+
         log('main', 'MAIN-SUMMARY', 'Task execution completed:', 'log', 'cyan')
         log('main', 'MAIN-SUMMARY', `✅ Successful accounts: ${completedAccounts}/${accounts.length}`, 'log', 'green')
         log('main', 'MAIN-SUMMARY', `❌ Failed accounts: ${failedAccounts}/${accounts.length}`, 'log', failedAccounts > 0 ? 'yellow' : 'green')
@@ -260,8 +331,83 @@ export class MicrosoftRewardsBot {
     /**
      * 处理单个账户的任务
      */
-    private async processAccount(account: Account): Promise<void> {
-        this.axios = new Axios(account.proxy)
+    private async runVisualPhase(candidates: VisualSearchCandidate[]): Promise<VisualSearchResult[]> {
+        if (this.config.workers.doVisualSearch === false || candidates.length === 0) return []
+
+        const settings = resolveVisualSearchConfig(this.config.visualSearch)
+        const repository = await ImageRepository.open(settings.imageDirectory)
+        if (repository.size === 0) {
+            log('main', 'VISUAL-SEARCH', `No valid images in ${settings.imageDirectory}; proxy phase skipped`, 'warn')
+            return candidates.map(candidate => ({
+                email: candidate.email,
+                status: 'skipped',
+                reason: 'No valid Visual Search image'
+            }))
+        }
+
+        const results: VisualSearchResult[] = []
+        for (const candidate of candidates) {
+            const account = this.accounts.find(item => item.email === candidate.email)
+            const imagePath = repository.pick()
+            if (!account || !imagePath) {
+                results.push({ email: candidate.email, status: 'skipped', reason: 'Account or image unavailable' })
+                continue
+            }
+
+            let managedBrowser: ManagedBrowser | null = null
+            try {
+                this.isMobile = false
+                managedBrowser = await this.browserFactory.createBrowser({
+                    network: { mode: 'proxy', proxy: account.proxy },
+                    ignoreForceRelogin: true,
+                    persistFingerprint: false,
+                    loadFingerprint: true
+                }, account.email)
+                this.registerManagedBrowser(managedBrowser)
+                const page = await managedBrowser.context.newPage()
+                const runner = new VisualSearchRunner(page, {
+                    taskTimeoutMs: typeof settings.taskTimeout === 'number'
+                        ? settings.taskTimeout
+                        : this.utils.stringToMs(settings.taskTimeout),
+                    completionTimeoutMs: typeof settings.completionTimeout === 'number'
+                        ? settings.completionTimeout
+                        : this.utils.stringToMs(settings.completionTimeout),
+                    wait: milliseconds => this.utils.wait(milliseconds),
+                    log: (message, type = 'log') => log(false, 'VISUAL-SEARCH', message, type),
+                    ensureLogin: () => this.login.login(page, account.email, account.password, false)
+                })
+                results.push(await runner.run(candidate, imagePath))
+            } catch (error) {
+                results.push({
+                    email: candidate.email,
+                    status: 'failed',
+                    reason: error instanceof Error ? error.message : String(error)
+                })
+            } finally {
+                if (managedBrowser) await this.closeManagedBrowser(managedBrowser, false).catch(() => null)
+            }
+        }
+
+        return results
+    }
+
+    private logVisualSummary(results: VisualSearchResult[]): void {
+        if (results.length === 0) return
+        const completed = results.filter(result => result.status === 'completed').length
+        const unconfirmed = results.filter(result => result.status === 'unconfirmed').length
+        const failed = results.filter(result => result.status === 'failed').length
+        const skipped = results.filter(result => result.status === 'skipped').length
+        log('main', 'MAIN-SUMMARY', `Visual Search: completed=${completed}, unconfirmed=${unconfirmed}, failed=${failed}, skipped=${skipped}`)
+    }
+
+    private logSummary(normal: NormalPhaseSummary, visual: VisualSearchResult[]): void {
+        log('main', 'MAIN-SUMMARY', `Successful accounts: ${normal.completedAccounts}/${normal.totalAccounts}`, 'log', 'green')
+        log('main', 'MAIN-SUMMARY', `Failed accounts: ${normal.failedAccounts}/${normal.totalAccounts}`, 'log', normal.failedAccounts > 0 ? 'yellow' : 'green')
+        this.logVisualSummary(visual)
+    }
+
+    private async processAccount(account: Account): Promise<VisualSearchCandidate | null> {
+        this.axios = new Axios(DIRECT_ACCOUNT_PROXY)
 
         // 🎯 为新账户清理弹窗处理历史
         this.browser.utils.clearPopupHistory()
@@ -269,8 +415,9 @@ export class MicrosoftRewardsBot {
         // Microsoft now shares one search-points cap across desktop and mobile.
         // Run desktop only to avoid a second browser, duplicate OAuth, and extra throttling risk.
         this.isMobile = false
-        await this.Desktop(account)
+        const candidate = await this.Desktop(account)
         log('main', 'MAIN-SUCCESS', `Desktop task completed for ${account.email}`, 'log', 'green')
+        return candidate
     }
 
     private registerManagedBrowser(managedBrowser: ManagedBrowser): void {
@@ -343,12 +490,16 @@ export class MicrosoftRewardsBot {
     }
 
     // Desktop
-    async Desktop(account: Account): Promise<void> {
+    async Desktop(account: Account): Promise<VisualSearchCandidate | null> {
         let managedBrowser: ManagedBrowser | null = null
         let sessionStable = false
+        let visualCandidate: VisualSearchCandidate | null = null
 
         try {
-            managedBrowser = await this.browserFactory.createBrowser(account.proxy, account.email)
+            managedBrowser = await this.browserFactory.createBrowser({
+                network: { mode: 'direct' },
+                loadFingerprint: true
+            }, account.email)
             this.registerManagedBrowser(managedBrowser)
             this.homePage = await managedBrowser.context.newPage()
 
@@ -357,6 +508,20 @@ export class MicrosoftRewardsBot {
             // Login into MS Rewards
             await this.login.login(this.homePage, account.email, account.password)
             sessionStable = true
+
+            if (this.config.workers.doVisualSearch !== false) {
+                const screening = await new DashboardDetector(
+                    this.homePage,
+                    milliseconds => this.utils.wait(milliseconds)
+                ).screen(account.email)
+                if (screening.status === 'candidate' && screening.candidate) {
+                    visualCandidate = screening.candidate
+                    log(this.isMobile, 'VISUAL-SEARCH', `Queued candidate from ${screening.language || 'unknown'} dashboard`)
+                } else {
+                    const message = `Screening result: ${screening.status}${screening.reason ? ` (${screening.reason})` : ''}`
+                    log(this.isMobile, 'VISUAL-SEARCH', message, screening.status === 'uncertain' ? 'warn' : 'log')
+                }
+            }
 
             // The new rewards.bing.com SPA has no scrapable dashboard, so data + activity completion go
             // through the dapi backend. Get the OAuth token, then claim activities via the API.
@@ -382,12 +547,6 @@ export class MicrosoftRewardsBot {
                             log(this.isMobile, 'EXPLORE', `Explore-on-Bing failed: ${exploreError}`, 'warn')
                         }
                         // Visual-search activation offer (+10) — reverse-engineered upload + signed-in GET.
-                        try {
-                            const visual = new VisualSearchRunner(this, api, searchPage)
-                            await visual.run()
-                        } catch (visualError) {
-                            log(this.isMobile, 'VISUAL-SEARCH', `Visual search failed: ${visualError}`, 'warn')
-                        }
                     }
                     const searcher = new SearchRunner(this, api, searchPage, account.email)
                     await searcher.run()
@@ -404,6 +563,7 @@ export class MicrosoftRewardsBot {
             // Close desktop browser
             await this.closeManagedBrowser(managedBrowser, true)
             managedBrowser = null
+            return visualCandidate
 
         } catch (error) {
             log(this.isMobile, 'DESKTOP-ERROR', `Desktop task failed for ${account.email}: ${error}`, 'error')
@@ -456,7 +616,7 @@ export class MicrosoftRewardsBot {
         let sessionStable = false
 
         try {
-            managedBrowser = await this.browserFactory.createBrowser(account.proxy, account.email)
+            managedBrowser = await this.browserFactory.createBrowser({ network: { mode: 'direct' } }, account.email)
             this.registerManagedBrowser(managedBrowser)
             this.homePage = await managedBrowser.context.newPage()
 
