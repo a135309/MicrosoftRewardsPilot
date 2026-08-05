@@ -53,6 +53,31 @@ export function normalizeClaimPointsLocale(language?: string | null): ClaimPoint
     return language && /^zh(?:[-_]|$)/i.test(language.trim()) ? 'zh-CN' : 'en'
 }
 
+export function getClaimPointsLocaleCandidates(...languages: Array<string | null | undefined>): ClaimPointsLocale[] {
+    const locales: ClaimPointsLocale[] = []
+    const add = (locale: ClaimPointsLocale): void => {
+        if (!locales.includes(locale)) locales.push(locale)
+    }
+
+    for (const language of languages) {
+        if (language) add(normalizeClaimPointsLocale(language))
+    }
+
+    add('en')
+    add('zh-CN')
+    return locales
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function getClaimCardAccessibleNamePattern(copy: ClaimPointsCopy): RegExp {
+    const title = escapeRegExp(copy.cardTitle)
+    const action = escapeRegExp(copy.cardAction)
+    return new RegExp(`^${title}(?:\\s+${title})?\\s+[\\d,\\s\\u00a0]+\\s+${action}$`, 'i')
+}
+
 export function parseStandalonePoints(values: readonly string[]): number | null {
     for (const raw of values) {
         const value = raw.replace(/\u00a0/g, ' ').trim()
@@ -90,7 +115,9 @@ interface PostClaimDomState {
 export class ClaimablePointsRunner {
     private static readonly DASHBOARD_TIMEOUT_MS = 20_000
     private static readonly DIALOG_TIMEOUT_MS = 10_000
+    private static readonly DASHBOARD_RESPONSE_TIMEOUT_MS = 10_000
     private static readonly DOM_VERIFY_ATTEMPTS = 10
+    private static readonly DOM_VERIFY_STABLE_READS = 2
     private static readonly BALANCE_VERIFY_ATTEMPTS = 5
 
     constructor(
@@ -154,8 +181,12 @@ export class ClaimablePointsRunner {
             const balanceBefore = (await this.api.getData()).balance
 
             // Click exactly once. Every subsequent step only reads state.
+            const claimResponse = this.waitForDashboardResponse('POST')
+            const refreshResponse = this.waitForDashboardResponse('GET')
             await claimButton.click()
-            await this.page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined)
+            const [claimStatus, refreshStatus] = await Promise.all([claimResponse, refreshResponse])
+            this.logDashboardResponse('领取请求', claimStatus)
+            this.logDashboardResponse('领取刷新', refreshStatus)
 
             const domState = await this.waitForClaimedDom(locales, cardMatch.copy)
             const balanceAfter = await this.waitForBalance(expectedPoints, balanceBefore)
@@ -198,42 +229,53 @@ export class ClaimablePointsRunner {
     }
 
     private async getLocaleCandidates(): Promise<ClaimPointsLocale[]> {
-        const locales: ClaimPointsLocale[] = []
-        const add = (locale: ClaimPointsLocale): void => {
-            if (!locales.includes(locale)) locales.push(locale)
-        }
-
         const pageLanguage = await this.page.evaluate(() => document.documentElement.lang || navigator.language || '')
             .catch(() => '')
-        if (pageLanguage) add(normalizeClaimPointsLocale(pageLanguage))
+        let geoLanguage = ''
 
         try {
             const location = await GeoLanguageDetector.getCurrentLocation(this.proxy)
-            add(normalizeClaimPointsLocale(location.language))
+            geoLanguage = location.language
         } catch (error) {
             this.log(`页面语言地理检测失败：${error}`, 'warn')
         }
 
-        add('en')
-        add('zh-CN')
-        return locales
+        return getClaimPointsLocaleCandidates(pageLanguage, geoLanguage)
     }
 
     private dashboardCard(copy: ClaimPointsCopy): Locator {
-        return this.page
+        const byAccessibleName = this.page.getByRole('button', {
+            name: getClaimCardAccessibleNamePattern(copy)
+        })
+        const byImage = this.page
             .getByRole('button')
             .filter({ has: this.page.locator(`img[alt="${copy.cardTitle}"]`) })
             .filter({ hasText: copy.cardAction })
-            .first()
+        return byAccessibleName.or(byImage)
+    }
+
+    private async getSingleVisible(locator: Locator, label: string): Promise<Locator | null> {
+        const count = await locator.count().catch(() => 0)
+        let match: Locator | null = null
+
+        for (let index = 0; index < count; index++) {
+            const candidate = locator.nth(index)
+            if (!await this.isVisible(candidate)) continue
+            if (match) {
+                this.log(`${label}匹配到多个可见元素，停止操作`, 'warn')
+                return null
+            }
+            match = candidate
+        }
+
+        return match
     }
 
     private async locateDashboardCard(locales: readonly ClaimPointsLocale[]): Promise<DashboardCardMatch | null> {
         for (const locale of locales) {
             const copy = CLAIM_POINTS_COPY[locale]
-            const card = this.dashboardCard(copy)
-            if (await this.isVisible(card)) {
-                return { card, copy }
-            }
+            const card = await this.getSingleVisible(this.dashboardCard(copy), `${copy.cardTitle}卡片`)
+            if (card) return { card, copy }
         }
         return null
     }
@@ -249,16 +291,43 @@ export class ClaimablePointsRunner {
     }
 
     private async readDashboardPoints(card: Locator): Promise<number | null> {
-        const values = await card.locator('p').allTextContents()
-        return parseStandalonePoints(values)
+        return this.readStandalonePoints(card)
     }
 
     private async locateDialog(copy: ClaimPointsCopy): Promise<Locator | null> {
-        const namedDialog = this.page.getByRole('dialog', { name: copy.dialogTitle, exact: true }).first()
-        if (await this.isVisible(namedDialog)) return namedDialog
+        const namedDialog = await this.getSingleVisible(
+            this.page.getByRole('dialog', { name: copy.dialogTitle, exact: true }),
+            `${copy.dialogTitle}侧栏`
+        )
+        if (namedDialog) return namedDialog
 
-        const fallback = this.page.locator('[role="dialog"]').filter({ hasText: copy.dialogTitle }).first()
-        return await this.isVisible(fallback) ? fallback : null
+        const roleFallback = await this.getSingleVisible(
+            this.page.locator('[role="dialog"]').filter({ hasText: copy.dialogTitle }),
+            `${copy.dialogTitle}侧栏`
+        )
+        if (roleFallback) return roleFallback
+
+        const heading = await this.getSingleVisible(
+            this.page.getByRole('heading', { name: copy.dialogTitle, exact: true }),
+            `${copy.dialogTitle}标题`
+        )
+        if (!heading) return null
+
+        let container = heading.locator('xpath=..')
+        for (let depth = 0; depth < 6; depth++) {
+            const hasClaimButton = await this.isVisible(
+                container.getByRole('button', { name: copy.claimButton, exact: true }).first()
+            )
+            const hasPending = await this.isVisible(container.getByText(copy.pending, { exact: true }).first())
+            const hasEmpty = await this.isVisible(container.getByText(copy.empty, { exact: true }).first())
+            const hasEarnMore = await this.isVisible(
+                container.getByRole('link', { name: copy.earnMore, exact: true }).first()
+            )
+            if (hasClaimButton || hasPending || hasEmpty || hasEarnMore) return container
+            container = container.locator('xpath=..')
+        }
+
+        return null
     }
 
     private async waitForDialog(copy: ClaimPointsCopy): Promise<Locator | null> {
@@ -274,15 +343,32 @@ export class ClaimablePointsRunner {
     private async readPendingPoints(dialog: Locator, copy: ClaimPointsCopy): Promise<number | null> {
         const pending = dialog.getByText(copy.pending, { exact: true }).first()
         if (!await this.isVisible(pending)) return null
-        const summary = pending.locator('xpath=..')
-        return parseStandalonePoints(await summary.locator('p').allTextContents())
+        return this.readPointsNear(pending)
     }
 
     private async readDialogPoints(dialog: Locator, copy: ClaimPointsCopy): Promise<number | null> {
         const pointsImage = dialog.locator(`img[alt="${copy.pointsAlt}"]`).first()
         if (!await this.isVisible(pointsImage)) return null
-        const summary = pointsImage.locator('xpath=..')
-        return parseStandalonePoints(await summary.locator('p').allTextContents())
+        return this.readPointsNear(pointsImage)
+    }
+
+    private async readPointsNear(anchor: Locator): Promise<number | null> {
+        let container = anchor.locator('xpath=..')
+        for (let depth = 0; depth < 3; depth++) {
+            const points = await this.readStandalonePoints(container)
+            if (points !== null) return points
+            container = container.locator('xpath=..')
+        }
+        return null
+    }
+
+    private async readStandalonePoints(container: Locator): Promise<number | null> {
+        const paragraphs = await container.locator('p').allTextContents().catch(() => [])
+        const paragraphPoints = parseStandalonePoints(paragraphs)
+        if (paragraphPoints !== null) return paragraphPoints
+
+        const leafTexts = await container.locator('xpath=.//*[not(*)]').allTextContents().catch(() => [])
+        return parseStandalonePoints(leafTexts)
     }
 
     private async waitForClaimedDom(
@@ -290,15 +376,14 @@ export class ClaimablePointsRunner {
         copy: ClaimPointsCopy
     ): Promise<PostClaimDomState> {
         let remainingPoints: number | null = null
+        let stableReads = 0
 
         for (let attempt = 0; attempt < ClaimablePointsRunner.DOM_VERIFY_ATTEMPTS; attempt++) {
             const cardMatch = await this.locateDashboardCard(locales)
             remainingPoints = cardMatch ? await this.readDashboardPoints(cardMatch.card) : null
 
             const dialog = await this.locateDialog(copy)
-            if (!dialog && remainingPoints === 0) {
-                return { verified: true, remainingPoints }
-            }
+            let verified = !dialog && remainingPoints === 0
 
             if (dialog) {
                 const dialogPoints = await this.readDialogPoints(dialog, copy)
@@ -311,15 +396,18 @@ export class ClaimablePointsRunner {
                     dialog.getByRole('link', { name: copy.earnMore, exact: true }).first()
                 )
 
-                if (
+                verified = (
                     remainingPoints === 0 &&
                     dialogPoints === 0 &&
                     !pendingVisible &&
                     !claimVisible &&
                     (emptyVisible || earnMoreVisible)
-                ) {
-                    return { verified: true, remainingPoints }
-                }
+                )
+            }
+
+            stableReads = verified ? stableReads + 1 : 0
+            if (stableReads >= ClaimablePointsRunner.DOM_VERIFY_STABLE_READS) {
+                return { verified: true, remainingPoints }
             }
 
             if (attempt < ClaimablePointsRunner.DOM_VERIFY_ATTEMPTS - 1) {
@@ -328,6 +416,30 @@ export class ClaimablePointsRunner {
         }
 
         return { verified: false, remainingPoints }
+    }
+
+    private async waitForDashboardResponse(method: 'GET' | 'POST'): Promise<number | null> {
+        const expectedOrigin = new URL(this.page.url()).origin
+        return this.page.waitForResponse(response => {
+            try {
+                const url = new URL(response.url())
+                return response.request().method() === method &&
+                    url.origin === expectedOrigin &&
+                    url.pathname === '/dashboard'
+            } catch {
+                return false
+            }
+        }, { timeout: ClaimablePointsRunner.DASHBOARD_RESPONSE_TIMEOUT_MS })
+            .then(response => response.status())
+            .catch(() => null)
+    }
+
+    private logDashboardResponse(label: string, status: number | null): void {
+        if (status === null) {
+            this.log(`${label}未捕获，继续使用页面和积分接口校验`, 'warn')
+        } else if (status < 200 || status >= 300) {
+            this.log(`${label}返回 HTTP ${status}`, 'warn')
+        }
     }
 
     private async waitForBalance(expectedPoints: number, balanceBefore: number): Promise<number | null> {
