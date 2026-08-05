@@ -222,13 +222,19 @@ export function loadConfig(): Config {
     }
 }
 
-export async function loadSessionData(sessionPath: string, email: string, isMobile: boolean, saveFingerprint: ConfigSaveFingerprint) {
+export async function loadSessionData(
+    sessionPath: string,
+    email: string,
+    isMobile: boolean,
+    saveFingerprint: ConfigSaveFingerprint,
+    forceRelogin = false
+) {
     try {
         // Fetch cookie file - 使用项目根目录的sessions路径
         const cookieFile = path.join(process.cwd(), sessionPath, email, `${isMobile ? 'mobile_cookies' : 'desktop_cookies'}.json`)
 
         let cookies: Cookie[] = []
-        if (fs.existsSync(cookieFile)) {
+        if (!forceRelogin && fs.existsSync(cookieFile)) {
             const cookiesData = await fs.promises.readFile(cookieFile, 'utf-8')
             cookies = JSON.parse(cookiesData)
         }

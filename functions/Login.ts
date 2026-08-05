@@ -12,6 +12,9 @@ import { AccountLockedError, LoginTimeoutError } from '../interfaces/Errors'
 
 export class Login {
     private bot: MicrosoftRewardsBot
+    private readonly emailInputSelector = 'input[type="email"], input[name="loginfmt"], #i0116'
+    private readonly passwordInputSelector = 'input[type="password"], #i0118'
+    private readonly submitButtonSelector = 'button[type="submit"], input[type="submit"], #idSIButton9'
     private clientId: string = '0000000040170455'
     private authBaseUrl: string = 'https://login.live.com/oauth20_authorize.srf'
     private redirectUrl: string = 'https://login.live.com/oauth20_desktop.srf'
@@ -26,6 +29,75 @@ export class Login {
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
         this.humanBehavior = new HumanBehaviorSimulator()
+    }
+
+    private get loginTimeoutMs(): number {
+        const configuredTimeout = Number(process.env.LOGIN_TIMEOUT_MS || 30000)
+        return Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 30000
+    }
+
+    private isAuthenticatedRewardsUrl(url: URL): boolean {
+        const isRewardsHost = url.hostname === 'rewards.bing.com' || url.hostname.endsWith('.rewards.bing.com')
+        const pathname = url.pathname.replace(/\/+$/, '') || '/'
+        return isRewardsHost && (pathname === '/dashboard' || pathname.startsWith('/dashboard/'))
+    }
+
+    private async isAuthenticatedRewardsPage(page: Page, timeout = 0): Promise<boolean> {
+        if (this.isAuthenticatedRewardsUrl(new URL(page.url()))) {
+            return true
+        }
+        if (timeout <= 0) {
+            return false
+        }
+        return await page.waitForURL(/rewards\.bing\.com\/dashboard/, { timeout }).then(() => true).catch(() => false)
+    }
+
+    private async registerFidoRoute(page: Page): Promise<void> {
+        await page.route('**/GetCredentialType.srf*', async (route: any) => {
+            const postData = route.request().postData()
+            if (!postData) {
+                await route.continue()
+                return
+            }
+
+            try {
+                const body = JSON.parse(postData)
+                body.isFidoSupported = false
+                await route.continue({ postData: JSON.stringify(body) })
+            } catch {
+                await route.continue()
+            }
+        }).catch(() => { })
+    }
+
+    private async waitForInitialLoginState(page: Page): Promise<void> {
+        await Promise.race([
+            page.waitForURL(/rewards\.bing\.com\/(dashboard|welcome|signin|createuser)/, { timeout: this.loginTimeoutMs }),
+            page.waitForSelector(`${this.emailInputSelector}, ${this.passwordInputSelector}, #userDisplayName`, {
+                state: 'visible',
+                timeout: this.loginTimeoutMs
+            })
+        ]).catch(() => { })
+    }
+
+    private async hasMicrosoftLoginForm(page: Page): Promise<boolean> {
+        return await page.waitForSelector(
+            `${this.emailInputSelector}, ${this.passwordInputSelector}, #userDisplayName`,
+            { state: 'visible', timeout: 1000 }
+        ).then(() => true).catch(() => false)
+    }
+
+    private async logLoginDiagnostics(page: Page, phase: string): Promise<void> {
+        const emailFieldVisible = await page.locator(this.emailInputSelector).first().isVisible().catch(() => false)
+        const passwordFieldVisible = await page.locator(this.passwordInputSelector).first().isVisible().catch(() => false)
+        const cookieCount = await page.context().cookies().then(cookies => cookies.length).catch(() => -1)
+        const currentUrl = page.url()
+        const loggedIn = this.isAuthenticatedRewardsUrl(new URL(currentUrl))
+        this.bot.log(
+            this.bot.isMobile,
+            'LOGIN-STATE',
+            `${phase} | URL: ${currentUrl} | loggedIn: ${loggedIn} | emailField: ${emailFieldVisible} | passwordField: ${passwordFieldVisible} | cookies: ${cookieCount}`
+        )
     }
 
     private async promptForInput(question: string): Promise<string> {
@@ -47,15 +119,12 @@ export class Login {
         try {
             this.bot.log(this.bot.isMobile, 'LOGIN', 'Starting login process!')
 
-            // Navigate to the Bing login page
-            await page.goto('https://www.bing.com/rewards/dashboard')
+            // Disable FIDO before first navigation so initial credential request is covered.
+            await this.registerFidoRoute(page)
 
-            // Disable FIDO support in login request
-            await page.route('**/GetCredentialType.srf*', (route: any) => {
-                const body = JSON.parse(route.request().postData() || '{}')
-                body.isFidoSupported = false
-                route.continue({ postData: JSON.stringify(body) })
-            })
+            // Navigate to the Bing login page
+            await page.goto('https://www.bing.com/rewards/dashboard', { waitUntil: 'domcontentloaded' })
+            await this.waitForInitialLoginState(page)
 
             await page.waitForLoadState('domcontentloaded').catch(() => { })
 
@@ -64,18 +133,20 @@ export class Login {
             // Check if account is locked
             await this.checkAccountLocked(page)
 
-            // New Rewards UI: logged in when we land on the authenticated SPA (rewards.bing.com,
-            // not the anonymous /welcome or a sign-in page). The old RewardsPortal marker is gone.
-            await this.bot.utils.wait(1500)
-            const cu = new URL(page.url())
-            const isLoggedIn = (cu.hostname === 'rewards.bing.com' || cu.hostname.endsWith('.rewards.bing.com'))
-                && !cu.pathname.includes('/welcome') && !cu.pathname.includes('/signin')
+            const currentUrl = new URL(page.url())
+            const isLoggedIn = this.isAuthenticatedRewardsUrl(currentUrl)
+            const hasLoginForm = await this.hasMicrosoftLoginForm(page)
+            await this.logLoginDiagnostics(page, 'Initial login state')
 
             if (!isLoggedIn) {
                 // The anonymous welcome page has no email field — it requires clicking "Sign in"
                 // to reach the Microsoft login page first.
-                if (page.url().includes('/welcome')) {
+                if (currentUrl.pathname === '/welcome') {
                     await this.startSignInFromWelcome(page)
+                }
+                if (!hasLoginForm && !(await this.hasMicrosoftLoginForm(page))) {
+                    await page.goto('https://rewards.bing.com/signin', { waitUntil: 'domcontentloaded' })
+                    await this.waitForInitialLoginState(page)
                 }
                 await this.execLogin(page, email, password)
             } else {
@@ -87,8 +158,8 @@ export class Login {
 
             // Check if logged in to bing
             await this.checkBingLogin(page)
+            await this.logLoginDiagnostics(page, 'Login completed')
 
-            // Save session
             await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile)
 
             // We're done logging in
@@ -104,15 +175,18 @@ export class Login {
     private async startSignInFromWelcome(page: Page): Promise<void> {
         try {
             this.bot.log(this.bot.isMobile, 'LOGIN', 'On Rewards welcome page — clicking "Sign in" to reach the Microsoft login page')
-            const signInLink = await page.waitForSelector('#rewards-header-sign-in, #card-footer-sign-in-link', { state: 'visible', timeout: 5000 }).catch(() => null)
+            const signInLink = await page.waitForSelector('#rewards-header-sign-in, #card-footer-sign-in-link', { state: 'visible', timeout: this.loginTimeoutMs }).catch(() => null)
             if (signInLink) {
                 await signInLink.click()
             } else {
                 this.bot.log(this.bot.isMobile, 'LOGIN', 'Sign-in link not found on welcome page; navigating to signin directly', 'warn')
-                await page.goto('https://rewards.bing.com/signin', { waitUntil: 'domcontentloaded' }).catch(() => { })
+                await page.goto('https://rewards.bing.com/signin', { waitUntil: 'domcontentloaded' })
             }
             // Wait for the Microsoft login page (email field, or password/userDisplayName if prefilled)
-            await page.waitForSelector('input[type="email"], input[type="password"], #userDisplayName', { state: 'visible', timeout: 15000 }).catch(() => null)
+            await page.waitForSelector(`${this.emailInputSelector}, ${this.passwordInputSelector}, #userDisplayName`, {
+                state: 'visible',
+                timeout: this.loginTimeoutMs
+            }).catch(() => null)
             await this.bot.utils.wait(1000)
         } catch (error) {
             this.bot.log(this.bot.isMobile, 'LOGIN', `Failed to start sign-in from welcome page: ${error}`, 'warn')
@@ -153,14 +227,12 @@ export class Login {
     }
 
     private async enterEmail(page: Page, email: string) {
-        const emailInputSelector = 'input[type="email"]'
-
         try {
             // Wait for email field
-            const emailField = await page.waitForSelector(emailInputSelector, { state: 'visible', timeout: 2000 }).catch(() => null)
+            const emailField = await page.waitForSelector(this.emailInputSelector, { state: 'visible', timeout: this.loginTimeoutMs }).catch(() => null)
             if (!emailField) {
                 const emailPrefilled = await page.waitForSelector('#userDisplayName', { timeout: 1000 }).catch(() => null)
-                const passwordField = await page.waitForSelector('input[type="password"]', { state: 'visible', timeout: 1000 }).catch(() => null)
+                const passwordField = await page.waitForSelector(this.passwordInputSelector, { state: 'visible', timeout: 1000 }).catch(() => null)
                 if (emailPrefilled || passwordField) {
                     this.bot.log(this.bot.isMobile, 'LOGIN', 'Email step already completed by Microsoft')
                     return
@@ -178,13 +250,13 @@ export class Login {
             } else {
                 // 🎭 使用人类化打字输入邮箱
                 await this.humanBehavior.simulateThinking()
-                await page.fill(emailInputSelector, '')
+                await page.fill(this.emailInputSelector, '')
                 await this.bot.utils.wait(500)
-                await this.humanBehavior.humanType(page, email, emailInputSelector)
+                await this.humanBehavior.humanType(page, email, this.emailInputSelector)
                 await this.bot.utils.wait(1000)
             }
 
-            const nextButton = await page.waitForSelector('button[type="submit"]', { timeout: 2000 }).catch(() => null)
+            const nextButton = await page.waitForSelector(this.submitButtonSelector, { state: 'visible', timeout: this.loginTimeoutMs }).catch(() => null)
             if (nextButton) {
                 // 🎭 使用人类化点击
                 await this.humanBehavior.simulateThinking()
@@ -213,7 +285,6 @@ export class Login {
     }
 
     private async enterPassword(page: Page, password: string) {
-        const passwordInputSelector = 'input[type="password"]'
         try {
             const viewFooter = await page.waitForSelector('[data-testid="viewFooter"]', { timeout: 2000 }).catch(() => null)
             if (viewFooter) {
@@ -227,7 +298,7 @@ export class Login {
                     // After "other ways to sign in", the password field is often shown directly. If not,
                     // pick the explicit "Use your password" option. (The previous blind nth(1) list click
                     // could land on the create-account option and navigate to signup.live.com.)
-                    const passwordVisible = await page.waitForSelector(passwordInputSelector, { state: 'visible', timeout: 3000 }).catch(() => null)
+                    const passwordVisible = await page.waitForSelector(this.passwordInputSelector, { state: 'visible', timeout: 3000 }).catch(() => null)
                     if (!passwordVisible) {
                         const usePasswordTexts = ['Use your password', 'パスワードを使用する', '使用密码', '비밀번호 사용', 'Passwort verwenden', 'Utiliser votre mot de passe', 'Usar tu contraseña']
                         for (const t of usePasswordTexts) {
@@ -242,7 +313,7 @@ export class Login {
             }
 
             // Wait for password field
-            const passwordField = await page.waitForSelector(passwordInputSelector, { state: 'visible', timeout: 5000 }).catch(() => null)
+            const passwordField = await page.waitForSelector(this.passwordInputSelector, { state: 'visible', timeout: this.loginTimeoutMs }).catch(() => null)
             if (!passwordField) {
                 this.bot.log(this.bot.isMobile, 'LOGIN', 'Password field not found, possibly 2FA required', 'warn')
                 await this.handle2FA(page)
@@ -253,12 +324,12 @@ export class Login {
 
             // 🎭 使用人类化密码输入
             await this.humanBehavior.simulateThinking()
-            await page.fill(passwordInputSelector, '')
+            await page.fill(this.passwordInputSelector, '')
             await this.bot.utils.wait(500)
-            await this.humanBehavior.humanType(page, password, passwordInputSelector)
+            await this.humanBehavior.humanType(page, password, this.passwordInputSelector)
             await this.bot.utils.wait(1000)
 
-            const nextButton = await page.waitForSelector('button[type="submit"]', { timeout: 2000 }).catch(() => null)
+            const nextButton = await page.waitForSelector(this.submitButtonSelector, { state: 'visible', timeout: this.loginTimeoutMs }).catch(() => null)
             if (nextButton) {
                 // 🎭 使用人类化点击
                 await this.humanBehavior.simulateThinking()
@@ -272,7 +343,7 @@ export class Login {
                 this.bot.log(this.bot.isMobile, 'LOGIN', 'Password entered successfully')
             } else {
                 const loginProgressed = await Promise.race([
-                    page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 3000 }).then(() => true).catch(() => false),
+                    page.waitForURL(/rewards\.bing\.com\/dashboard/, { timeout: this.loginTimeoutMs }).then(() => true).catch(() => false),
                     page.waitForSelector('input[name="otc"]', { state: 'visible', timeout: 3000 }).then(() => true).catch(() => false),
                     page.waitForSelector('input[name="proofconfirmation"]', { state: 'visible', timeout: 3000 }).then(() => true).catch(() => false),
                     page.waitForSelector('#displaySign, [data-testid="displaySign"]', { state: 'visible', timeout: 3000 }).then(() => true).catch(() => false)
@@ -296,7 +367,7 @@ export class Login {
      */
     private async handlePostPasswordTwoFactor(page: Page): Promise<void> {
         try {
-            const alreadyIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 2000 }).then(() => true).catch(() => false)
+            const alreadyIn = await this.isAuthenticatedRewardsPage(page, 2000)
             if (alreadyIn) {
                 return
             }
@@ -330,7 +401,7 @@ export class Login {
             }
             
             // 检查是否已经登录成功（可能其他实例已完成登录）
-            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 3000 }).then(() => true).catch(() => false)
+            const isLoggedIn = await this.isAuthenticatedRewardsPage(page, 3000)
             if (isLoggedIn) {
                 this.bot.log(this.bot.isMobile, 'LOGIN', '2FA not required - already logged in')
                 return
@@ -385,7 +456,7 @@ export class Login {
                         await this.bot.utils.wait(10000) // 等待10秒
                         
                         // 再次检查是否已登录
-                        const isNowLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 5000 }).then(() => true).catch(() => false)
+                        const isNowLoggedIn = await this.isAuthenticatedRewardsPage(page, 5000)
                         if (isNowLoggedIn) {
                             this.bot.log(this.bot.isMobile, 'LOGIN', 'Login completed by parallel process')
                             return
@@ -569,11 +640,7 @@ export class Login {
         authorizeUrl.searchParams.append('login_hint', email)
 
         // Disable FIDO for OAuth flow as well (reduces passkey prompts resurfacing)
-        await page.route('**/GetCredentialType.srf*', (route: any) => {
-            const body = JSON.parse(route.request().postData() || '{}')
-            body.isFidoSupported = false
-            route.continue({ postData: JSON.stringify(body) })
-        }).catch(()=>{})
+        await this.registerFidoRoute(page)
 
         await page.goto(authorizeUrl.href)
 
@@ -628,23 +695,44 @@ export class Login {
     // Utils
 
     private async checkLoggedIn(page: Page) {
-        const targetHostname = 'rewards.bing.com'
-
         const start = Date.now()
         const maxWaitMs = Number(process.env.LOGIN_MAX_WAIT_MS || 180000) // default 3 minutes
         let guidanceLogged = false
+        let dashboardRecoveryAttempted = false
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
+            if (page.url().toLowerCase().includes('/fido/create')) {
+                const passkeyHandled = await this.attemptPasskeySkip(page)
+                if (passkeyHandled) {
+                    this.bot.log(this.bot.isMobile, 'LOGIN-PASSKEY', 'FIDO creation dialog cancelled; continuing login')
+                }
+            }
             await this.dismissLoginMessages(page)
-            const currentURL = new URL(page.url())
-            // New Rewards UI: a successful login lands on the authenticated SPA at
-            // rewards.bing.com/dashboard. The old "/" path + RewardsPortal markers are gone, so treat
-            // reaching the rewards host past the welcome/sign-in pages as logged in.
-            const onRewardsHost = currentURL.hostname === targetHostname || currentURL.hostname.endsWith('.rewards.bing.com')
-            const onLoginPage = currentURL.pathname.includes('/welcome') || currentURL.pathname.includes('/signin') || currentURL.pathname.includes('/createuser')
-            if (onRewardsHost && !onLoginPage) {
+            let currentUrl = new URL(page.url())
+            if (this.isAuthenticatedRewardsUrl(currentUrl)) {
                 break
+            }
+
+            const currentPath = currentUrl.pathname.replace(/\/+$/, '') || '/'
+            const onRewardsAbout = (currentUrl.hostname === 'rewards.bing.com' || currentUrl.hostname.endsWith('.rewards.bing.com'))
+                && currentPath === '/about'
+            if (onRewardsAbout && !dashboardRecoveryAttempted) {
+                dashboardRecoveryAttempted = true
+                this.bot.log(this.bot.isMobile, 'LOGIN-RECOVERY', 'Post-login About page detected; navigating to dashboard')
+                try {
+                    await page.goto('https://rewards.bing.com/dashboard', {
+                        waitUntil: 'domcontentloaded',
+                        timeout: this.loginTimeoutMs
+                    })
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, 'LOGIN-RECOVERY', `Dashboard navigation failed: ${error}`, 'warn')
+                }
+
+                currentUrl = new URL(page.url())
+                if (this.isAuthenticatedRewardsUrl(currentUrl)) {
+                    break
+                }
             }
 
             // If we keep looping without prompts for too long, advise and fail fast
@@ -663,6 +751,7 @@ export class Login {
 
         // Allow the dashboard SPA to settle (the old RewardsPortal DOM marker no longer exists)
         await this.bot.utils.wait(2000)
+        await this.logLoginDiagnostics(page, 'Authenticated dashboard')
         this.bot.log(this.bot.isMobile, 'LOGIN', 'Successfully logged into the rewards portal')
 
         // 🎯 处理Passkey设置循环问题
@@ -749,7 +838,7 @@ export class Login {
         try {
             // 检查URL特征
             const url = page.url().toLowerCase()
-            if (url.includes('passkey') || url.includes('fido') || url.includes('webauthn') || url.includes('authenticator')) {
+            if (url.includes('/fido/create') || url.includes('passkey') || url.includes('webauthn')) {
                 return true
             }
 
@@ -784,6 +873,23 @@ export class Login {
      * 尝试跳过Passkey设置
      */
     private async attemptPasskeySkip(page: Page): Promise<boolean> {
+        const cancelSelectors = [
+            'button:has-text("Cancel")',
+            'button:has-text("取消")',
+            'input[type="button"][value="Cancel"]',
+            'input[type="button"][value="取消"]',
+            '[data-testid="cancelButton"]'
+        ]
+
+        for (const selector of cancelSelectors) {
+            const cancelButton = await page.waitForSelector(selector, { state: 'visible', timeout: 1000 }).catch(() => null)
+            if (cancelButton) {
+                this.bot.log(this.bot.isMobile, 'LOGIN-PASSKEY', `FIDO creation dialog detected -> clicked cancel: ${selector}`)
+                await cancelButton.click()
+                await page.waitForTimeout(500)
+                return true
+            }
+        }
         // 跳过按钮的选择器（使用更安全的属性选择器）
         const skipSelectors = [
             '[data-testid="secondaryButton"]', // Microsoft常用的次要按钮
@@ -837,7 +943,23 @@ export class Login {
         return false
     }
 
+    private isNavigationRaceError(error: unknown): boolean {
+        return String(error).includes('Execution context was destroyed')
+    }
+
     private async dismissLoginMessages(page: Page) {
+        try {
+            await this.dismissLoginMessagesOnce(page)
+        } catch (error) {
+            if (!this.isNavigationRaceError(error)) {
+                throw error
+            }
+
+            this.bot.log(this.bot.isMobile, 'LOGIN-NAVIGATION', 'Page navigated while checking login dialogs; continuing with new page state')
+        }
+    }
+
+    private async dismissLoginMessagesOnce(page: Page) {
         let didSomething = false
 
         // PASSKEY / Windows Hello / Sign in faster
@@ -955,7 +1077,7 @@ export class Login {
             const titleEl = await page.waitForSelector('[data-testid="title"]', { timeout: 500 }).catch(() => null)
             const secondaryBtn = await page.waitForSelector('button[data-testid="secondaryButton"]', { timeout: 500 }).catch(() => null)
             // Direct text locator fallback (sometimes data-testid changes)
-            const textSkip = secondaryBtn ? null : await page.locator('xpath=//button[contains(normalize-space(.), "Skip for now")]').first().isVisible().catch(()=>false)
+            const textSkip = page.locator('xpath=//button[contains(normalize-space(.), "Skip for now")]').first()
             if (secondaryBtn) {
                 // Heuristic: if title indicates passkey or both primary/secondary exist with typical text
                 let shouldClick = false
@@ -965,9 +1087,6 @@ export class Login {
                     if (/sign in faster|passkey|fingerprint|face|pin/i.test(titleText)) {
                         shouldClick = true
                     }
-                }
-                if (!shouldClick && textSkip) {
-                    shouldClick = true
                 }
                 if (!shouldClick) {
                     // Fallback text probe on the secondary button itself
@@ -984,6 +1103,13 @@ export class Login {
                     this.passkeyHandled = true
                     await this.bot.utils.wait(500)
                 }
+            } else if (await textSkip.isVisible().catch(() => false)) {
+                await textSkip.click().catch(() => { })
+                if (!this.passkeyHandled) {
+                    this.bot.log(this.bot.isMobile, 'LOGIN-PASSKEY', 'Passkey prompt (loop) -> clicked text fallback')
+                }
+                this.passkeyHandled = true
+                await this.bot.utils.wait(500)
             }
         } catch { /* ignore minor errors */ }
     }
@@ -991,7 +1117,7 @@ export class Login {
     private async checkBingLogin(page: Page): Promise<void> {
         try {
             this.bot.log(this.bot.isMobile, 'LOGIN-BING', 'Verifying Bing login')
-            await page.goto('https://www.bing.com/fd/auth/signin?action=interactive&provider=windows_live_id&return_url=https%3A%2F%2Fwww.bing.com%2F')
+            await page.goto('https://www.bing.com/fd/auth/signin?action=interactive&provider=windows_live_id&return_url=https%3A%2F%2Fwww.bing.com%2F', { waitUntil: 'domcontentloaded' })
 
             const maxIterations = 5
             let verified = false
@@ -999,11 +1125,13 @@ export class Login {
             for (let iteration = 1; iteration <= maxIterations; iteration++) {
                 const currentUrl = new URL(page.url())
 
-                if (currentUrl.hostname === 'www.bing.com' && currentUrl.pathname === '/') {
+                const isBingHost = currentUrl.hostname === 'bing.com' || currentUrl.hostname.endsWith('.bing.com')
+
+                if (isBingHost) {
                     await this.bot.browser.utils.tryDismissAllMessages(page)
 
                     const loggedIn = await this.checkBingLoginStatus(page)
-                    if (loggedIn || this.bot.isMobile) {
+                    if (loggedIn) {
                         this.bot.log(this.bot.isMobile, 'LOGIN-BING', 'Bing login verification passed!')
                         verified = true
                         break
@@ -1024,12 +1152,15 @@ export class Login {
     }
 
     private async checkBingLoginStatus(page: Page): Promise<boolean> {
-        try {
-            await page.waitForSelector('#id_n', { timeout: 5000 })
+        const cookies = await page.context().cookies('https://www.bing.com/').catch(() => [])
+        const hasAuthenticatedBingCookie = cookies.some(cookie => cookie.name === '_U' && cookie.value.length > 0)
+        if (hasAuthenticatedBingCookie) {
             return true
-        } catch (error) {
-            return false
         }
+
+        return await page.waitForSelector('#id_n', { state: 'visible', timeout: 2000 })
+            .then(() => true)
+            .catch(() => false)
     }
 
     private async checkAccountLocked(page: Page) {
@@ -1145,7 +1276,7 @@ export class Login {
             }
             
             // 检查是否已经可以继续（有时页面会自动跳过）
-            const isRewardsPage = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 2000 }).catch(() => null)
+            const isRewardsPage = await this.isAuthenticatedRewardsPage(page, 2000)
             if (isRewardsPage) {
                 this.bot.log(this.bot.isMobile, 'LOGIN-MOBILE-2FA', 'Already on rewards page - 2FA passed')
                 return true
