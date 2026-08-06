@@ -20,11 +20,12 @@ import { SearchRunner } from './rewards-api/SearchRunner'
 import { ExploreRunner } from './rewards-api/ExploreRunner'
 import { DashboardDetector } from './visual-search/DashboardDetector'
 import { ImageRepository } from './visual-search/ImageRepository'
-import { VisualSearchRunner } from './visual-search/VisualSearchRunner'
+import { resolveVisualSearchManualPause, VisualSearchRunner } from './visual-search/VisualSearchRunner'
 import {
     VisualSearchCandidate,
     VisualSearchResult,
-    resolveVisualSearchConfig
+    resolveVisualSearchConfig,
+    resolveVisualSearchProxy
 } from './visual-search/types'
 
 import { Account, AccountProxy } from '../interfaces/Account'
@@ -345,6 +346,19 @@ export class MicrosoftRewardsBot {
             }))
         }
 
+        let visualProxy: AccountProxy
+        try {
+            visualProxy = resolveVisualSearchProxy(settings)
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            log('main', 'VISUAL-SEARCH', `${reason}; proxy phase failed`, 'error')
+            return candidates.map(candidate => ({
+                email: candidate.email,
+                status: 'failed',
+                reason
+            }))
+        }
+
         const results: VisualSearchResult[] = []
         for (const candidate of candidates) {
             const account = this.accounts.find(item => item.email === candidate.email)
@@ -358,7 +372,7 @@ export class MicrosoftRewardsBot {
             try {
                 this.isMobile = false
                 managedBrowser = await this.browserFactory.createBrowser({
-                    network: { mode: 'proxy', proxy: account.proxy },
+                    network: { mode: 'proxy', proxy: visualProxy },
                     ignoreForceRelogin: true,
                     persistFingerprint: false,
                     loadFingerprint: true
@@ -374,9 +388,14 @@ export class MicrosoftRewardsBot {
                         : this.utils.stringToMs(settings.completionTimeout),
                     wait: milliseconds => this.utils.wait(milliseconds),
                     log: (message, type = 'log') => log(false, 'VISUAL-SEARCH', message, type),
-                    ensureLogin: () => this.login.login(page, account.email, account.password, false)
+                    ensureLogin: () => this.login.login(page, account.email, account.password, false),
+                    manualUploadPause: resolveVisualSearchManualPause()
                 })
-                results.push(await runner.run(candidate, imagePath))
+                const result = await runner.run(candidate, imagePath)
+                results.push(result)
+                if (result.status === 'failed') {
+                    log('main', 'VISUAL-SEARCH', `${candidate.email} failed: ${result.reason ?? 'unknown error'}`, 'error')
+                }
             } catch (error) {
                 results.push({
                     email: candidate.email,

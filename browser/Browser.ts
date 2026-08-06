@@ -3,7 +3,7 @@ import { chromium, BrowserContext, Browser as PlaywrightBrowser } from 'rebrowse
 import { newInjectedContext } from 'fingerprint-injector'
 import { FingerprintGenerator } from 'fingerprint-generator'
 
-import { MicrosoftRewardsBot } from '../src/index'
+import type { MicrosoftRewardsBot } from '../src/index'
 import { loadSessionData, saveFingerprintData } from '../utils/Load'
 import { updateFingerprintUserAgent } from '../utils/UserAgent'
 import { GeoLanguageDetector, GeoLocation } from '../utils/GeoLanguage'
@@ -53,6 +53,44 @@ export function validateBrowserNetwork(network: BrowserNetwork): void {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('Visual Search proxy port is invalid')
     }
+}
+
+export function getBrowserLaunchArgs(
+    network: BrowserNetwork,
+    environment: NodeJS.ProcessEnv = process.env
+): string[] {
+    const args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-webrtc-hw-encoding',
+        '--disable-webrtc-hw-decoding',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        '--enable-features=NetworkService,NetworkServiceLogging',
+        '--force-color-profile=srgb',
+        '--metrics-recording-only',
+        '--use-mock-keychain',
+        '--no-first-run',
+        '--disable-gpu',
+        '--password-store=basic'
+    ]
+
+    if (network.mode === 'direct') {
+        args.push('--no-proxy-server')
+    }
+
+    const cdpPort = environment.BROWSER_CDP_PORT?.trim()
+    if (cdpPort) {
+        const parsedPort = Number(cdpPort)
+        if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+            throw new Error('BROWSER_CDP_PORT must be an integer between 1 and 65535')
+        }
+        args.push(`--remote-debugging-port=${parsedPort}`)
+    }
+
+    return args
 }
 
 // 定义浏览器上下文选项的类型
@@ -228,36 +266,7 @@ class Browser {
                     server: `${proxy.url}:${proxy.port}`
                 }
             }),
-            args: [
-                // 基础安全参数（保留必要的）
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-
-                // 反检测：在 blink 层移除 webdriver 标识（与 rebrowser 的 Runtime.enable 修复互为冗余保险）
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=VizDisplayCompositor',
-
-                // WebRTC 隐私保护
-                '--disable-webrtc-hw-encoding',
-                '--disable-webrtc-hw-decoding',
-                '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-
-                // 性能和稳定性（保持自然）
-                '--enable-features=NetworkService,NetworkServiceLogging',
-                '--force-color-profile=srgb',
-                '--metrics-recording-only',
-                '--use-mock-keychain',
-
-                // 保留必要的稳定性参数
-                '--no-first-run',
-                '--disable-gpu',
-                '--password-store=basic'
-                // NOTE: removed the malformed/contradictory switches that previously lived here
-                // (--exclude-switches=enable-automation, --disable-automation, --enable-automation=false,
-                // and several '...=false'-suffixed flags). Chromium boolean switches take no '=false'
-                // value, so those were no-ops at best and an inconsistent launch signature at worst.
-            ]
+            args: getBrowserLaunchArgs(options.network)
         })
 
         const forceRelogin = options.ignoreForceRelogin !== true && this.bot.config.forceRelogin === true

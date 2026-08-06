@@ -101,6 +101,13 @@ export interface ConfigVisualSearch {
     taskTimeout: ConfigDuration;
     completionTimeout: ConfigDuration;
     maxUploadAttempts: number;
+    proxy?: ConfigVisualSearchProxy;
+}
+
+export interface ConfigVisualSearchProxy {
+    server: string;
+    username?: string;
+    password?: string;
 }
 
 export interface ConfigChinaRegion {

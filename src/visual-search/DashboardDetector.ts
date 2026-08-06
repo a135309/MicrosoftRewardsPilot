@@ -9,6 +9,12 @@ import {
 
 const CARD_SELECTOR = 'button:has(img[src*="search_visual.svg"])'
 const TASK_LINK_SELECTOR = 'a[href*="vsstreak"][href*="vstooltip"]'
+const DASHBOARD_URL = 'https://rewards.bing.com/dashboard'
+
+function isAuthenticationUrl(value: string): boolean {
+    const url = new URL(value)
+    return /login\.live\.com$/i.test(url.hostname) || /signin|login|welcome/i.test(url.pathname)
+}
 
 export function parseProgress(current: string | null, max: string | null): VisualSearchProgress | null {
     if (current === null || max === null || current.trim() === '' || max.trim() === '') return null
@@ -90,7 +96,7 @@ export class DashboardDetector {
 
     async screen(email: string): Promise<VisualSearchScreeningResult> {
         try {
-            await this.page.goto('https://rewards.bing.com/dashboard', {
+            await this.page.goto(DASHBOARD_URL, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60_000
             })
@@ -155,6 +161,63 @@ export class DashboardDetector {
         }
     }
 
+    async openTaskPopup(expectedTaskUrl: string, timeoutMs: number): Promise<Page> {
+        if (!validateVisualSearchTaskUrl(expectedTaskUrl)) {
+            throw new Error('Queued Visual Search task URL is invalid')
+        }
+
+        await this.page.goto(DASHBOARD_URL, {
+            waitUntil: 'domcontentloaded',
+            timeout: Math.min(60_000, Math.max(1_000, timeoutMs))
+        })
+        await this.wait(1500)
+
+        const dashboardUrl = new URL(this.page.url())
+        if (!dashboardUrl.hostname.endsWith('rewards.bing.com') || isAuthenticationUrl(dashboardUrl.href)) {
+            throw new Error('Visual Search session is not authenticated')
+        }
+
+        for (let step = 0; step < 6; step++) {
+            await this.page.evaluate((scrollStep) => {
+                window.scrollTo({
+                    top: Math.min(document.body.scrollHeight, (scrollStep + 1) * window.innerHeight * 0.75),
+                    behavior: 'smooth'
+                })
+            }, step)
+            await this.wait(350)
+        }
+
+        const card = await firstVisible(this.page.locator(CARD_SELECTOR))
+        if (!card) throw new Error('Visual Search Dashboard card missing')
+        if (!(await readProgress(card))) throw new Error('Visual Search Dashboard card progress missing')
+
+        await card.click()
+        await this.wait(500)
+
+        const link = await firstVisible(this.page.locator(TASK_LINK_SELECTOR))
+        if (!link) throw new Error('Visual Search drawer link missing')
+        if (!validateVisualSearchTaskUrl(await link.getAttribute('href') ?? '')) {
+            throw new Error('Visual Search drawer link is invalid')
+        }
+
+        const popupTimeout = Math.min(15_000, Math.max(1_000, timeoutMs))
+        const popupPromise = this.page.waitForEvent('popup', { timeout: popupTimeout })
+        await link.click()
+        const popup = await popupPromise
+        await popup.waitForLoadState('domcontentloaded', { timeout: popupTimeout })
+
+        if (isAuthenticationUrl(popup.url())) {
+            await popup.close().catch(() => null)
+            throw new Error('Visual Search session is not authenticated')
+        }
+        if (!validateVisualSearchTaskUrl(popup.url())) {
+            await popup.close().catch(() => null)
+            throw new Error('Visual Search popup URL is invalid')
+        }
+
+        return popup
+    }
+
     async verifyCompletion(candidate: VisualSearchCandidate, timeoutMs: number): Promise<{
         completed: boolean
         cardAfter?: VisualSearchProgress
@@ -165,7 +228,7 @@ export class DashboardDetector {
         let lastDrawer: VisualSearchProgress | undefined
 
         do {
-            await this.page.goto('https://rewards.bing.com/dashboard', {
+            await this.page.goto(DASHBOARD_URL, {
                 waitUntil: 'domcontentloaded',
                 timeout: Math.min(60_000, Math.max(1_000, timeoutMs))
             }).catch(() => null)
