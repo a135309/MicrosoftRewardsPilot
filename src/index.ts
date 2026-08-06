@@ -19,6 +19,7 @@ import { RewardsApi } from './rewards-api/RewardsApi'
 import { SearchRunner } from './rewards-api/SearchRunner'
 import { ExploreRunner } from './rewards-api/ExploreRunner'
 import { VisualSearchRunner } from './rewards-api/VisualSearchRunner'
+import { ClaimablePointsRunner } from './rewards-api/ClaimablePointsRunner'
 
 import { Account } from '../interfaces/Account'
 import Axios from '../utils/Axios'
@@ -395,6 +396,19 @@ export class MicrosoftRewardsBot {
                     log(this.isMobile, 'SEARCH', `Desktop search failed: ${searchError}`, 'error')
                 } finally {
                     await searchPage.close().catch(() => { })
+                }
+            }
+
+            if (this.config.workers.doClaimablePoints !== false) {
+                try {
+                    const claimablePoints = new ClaimablePointsRunner(
+                        this,
+                        new RewardsApi(this, this.accessToken),
+                        this.homePage
+                    )
+                    await claimablePoints.run()
+                } catch (claimError) {
+                    log(this.isMobile, 'CLAIM-POINTS', `Claimable points module failed: ${claimError}`, 'warn')
                 }
             }
 
