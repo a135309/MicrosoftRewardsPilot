@@ -1,6 +1,5 @@
 import type { Locator, Page } from 'rebrowser-playwright'
 
-import type { AccountProxy } from '../../interfaces/Account'
 import { GeoLanguageDetector } from '../../utils/GeoLanguage'
 import type { MicrosoftRewardsBot } from '../index'
 import type { RewardsApi } from './RewardsApi'
@@ -123,8 +122,7 @@ export class ClaimablePointsRunner {
     constructor(
         private bot: MicrosoftRewardsBot,
         private api: RewardsApi,
-        private page: Page,
-        private proxy?: AccountProxy
+        private page: Page
     ) {}
 
     private log(message: string, type: 'log' | 'warn' | 'error' = 'log', color?: 'green' | 'yellow'): void {
@@ -234,7 +232,7 @@ export class ClaimablePointsRunner {
         let geoLanguage = ''
 
         try {
-            const location = await GeoLanguageDetector.getCurrentLocation(this.proxy)
+            const location = await GeoLanguageDetector.getCurrentLocation()
             geoLanguage = location.language
         } catch (error) {
             this.log(`页面语言地理检测失败：${error}`, 'warn')

@@ -8,6 +8,8 @@ import {
     normalizeClaimPointsLocale,
     parseStandalonePoints
 } from '../src/rewards-api/ClaimablePointsRunner'
+import { ClaimablePointsRunner } from '../src/rewards-api/ClaimablePointsRunner'
+import { GeoLanguageDetector } from '../utils/GeoLanguage'
 
 function testLocales(): void {
     assert.strictEqual(normalizeClaimPointsLocale('zh-CN'), 'zh-CN')
@@ -54,12 +56,47 @@ function testVerification(): void {
     assert.strictEqual(isClaimVerified(0, 0, 2650, 2650), false)
 }
 
-function main(): void {
+async function testDirectGeoLookup(): Promise<void> {
+    const original = GeoLanguageDetector.getCurrentLocation
+    let argumentCount = -1
+    GeoLanguageDetector.getCurrentLocation = (async (...args: unknown[]) => {
+        argumentCount = args.length
+        return {
+            country: 'United States',
+            countryCode: 'US',
+            city: 'Test',
+            timezone: 'America/New_York',
+            language: 'en',
+            currency: 'USD',
+            ip: '127.0.0.1',
+            latitude: 0,
+            longitude: 0
+        }
+    }) as typeof GeoLanguageDetector.getCurrentLocation
+
+    try {
+        const runner = new ClaimablePointsRunner(
+            { log: () => undefined, isMobile: false } as never,
+            {} as never,
+            { evaluate: async () => 'en-US' } as never
+        )
+        await (runner as unknown as { getLocaleCandidates(): Promise<unknown> }).getLocaleCandidates()
+        assert.strictEqual(argumentCount, 0)
+    } finally {
+        GeoLanguageDetector.getCurrentLocation = original
+    }
+}
+
+async function main(): Promise<void> {
     testLocales()
     testCardAccessibleNames()
     testPointParsing()
     testVerification()
+    await testDirectGeoLookup()
     console.log('claimable points tests passed')
 }
 
-main()
+main().catch(error => {
+    console.error(error)
+    process.exitCode = 1
+})

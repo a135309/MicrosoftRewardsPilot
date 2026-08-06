@@ -404,8 +404,7 @@ export class MicrosoftRewardsBot {
                     const claimablePoints = new ClaimablePointsRunner(
                         this,
                         new RewardsApi(this, this.accessToken),
-                        this.homePage,
-                        account.proxy
+                        this.homePage
                     )
                     await claimablePoints.run()
                 } catch (claimError) {
