@@ -4,13 +4,17 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { AccountProxy } from '../interfaces/Account'
 
+export function createDirectAxiosInstance(): AxiosInstance {
+    return axios.create({ proxy: false })
+}
+
 class AxiosClient {
     private instance: AxiosInstance
     private account: AccountProxy
 
     constructor(account: AccountProxy) {
         this.account = account
-        this.instance = axios.create()
+        this.instance = createDirectAxiosInstance()
 
         // If a proxy configuration is provided, set up the agent
         if (this.account.url && this.account.proxyAxios) {
@@ -54,7 +58,7 @@ class AxiosClient {
     // Passing `false` sends the request directly, bypassing the proxy.
     public async request(config: AxiosRequestConfig, useProxy = true): Promise<AxiosResponse> {
         if (!useProxy) {
-            const directInstance = axios.create()
+            const directInstance = createDirectAxiosInstance()
             return directInstance.request(config)
         }
 

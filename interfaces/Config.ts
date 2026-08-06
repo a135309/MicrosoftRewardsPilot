@@ -21,6 +21,7 @@ export interface Config {
     webhook: ConfigWebhook;
     popupHandling?: ConfigPopupHandling;
     passkeyHandling?: ConfigPasskeyHandling;
+    visualSearch?: Partial<ConfigVisualSearch>;
 }
 
 export interface ConfigSaveFingerprint {
@@ -92,7 +93,22 @@ export interface ConfigWorkers {
     doMobileSearch: boolean;
     doDailyCheckIn: boolean;
     doReadToEarn: boolean;
+    doVisualSearch?: boolean;
     doClaimablePoints?: boolean;
+}
+
+export interface ConfigVisualSearch {
+    imageDirectory: string;
+    taskTimeout: ConfigDuration;
+    completionTimeout: ConfigDuration;
+    maxUploadAttempts: number;
+    proxy?: ConfigVisualSearchProxy;
+}
+
+export interface ConfigVisualSearchProxy {
+    server: string;
+    username?: string;
+    password?: string;
 }
 
 export interface ConfigChinaRegion {

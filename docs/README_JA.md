@@ -431,6 +431,12 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
 
 ---
 
+## Visual Search
+
+Visual Search は 2 段階で実行します。通常タスクと Dashboard 判定は direct Chromium を使います。direct session 保存後、候補アカウントを各アカウントの proxy で 1 件ずつ実行します。proxy 側の cookies と fingerprint は direct session を上書きしません。
+
+非機密の JPEG、PNG、WebP、GIF を `visual-search-images/` に配置してください。画像は Bing にアップロードされ、既定で Git と Docker build context から除外されます。Dashboard card と drawer の両方が進み、最大値に到達した場合だけ完了と判定します。
+
 ## 重要な警告
 
 <div align="center">

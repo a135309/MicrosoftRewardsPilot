@@ -53,6 +53,25 @@ export function clearAccountsCache(): void {
     console.log('[CONFIG-LOADER] Accounts cache cleared')
 }
 
+export function filterAccounts(
+    accounts: Account[],
+    rawFilter: string | undefined = process.env.REWARDS_ACCOUNT_FILTER
+): Account[] {
+    const requestedEmails = (rawFilter ?? '')
+        .split(',')
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean)
+
+    if (requestedEmails.length === 0) return accounts
+
+    const requested = new Set(requestedEmails)
+    const filtered = accounts.filter(account => requested.has(account.email.trim().toLowerCase()))
+    if (filtered.length === 0) {
+        throw new Error('REWARDS_ACCOUNT_FILTER matched no accounts')
+    }
+    return filtered
+}
+
 /**
  * 手动刷新所有配置
  */
@@ -139,7 +158,7 @@ export function loadAccounts(): Account[] {
     try {
         // 如果有缓存，直接返回
         if (accountsCache) {
-            return accountsCache
+            return filterAccounts(accountsCache)
         }
 
         let file = 'accounts.json'
@@ -175,7 +194,7 @@ export function loadAccounts(): Account[] {
         }
 
         logConfigChange('accounts', 'loaded')
-        return parsedAccounts
+        return filterAccounts(parsedAccounts)
     } catch (error) {
         logConfigChange('accounts', 'error')
         throw new Error(`Failed to load accounts: ${error}`)
