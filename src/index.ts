@@ -28,6 +28,14 @@ import {
     resolveVisualSearchProxy
 } from './visual-search/types'
 import { ClaimablePointsRunner } from './rewards-api/ClaimablePointsRunner'
+import { runParallelFinalPhases } from './FinalPhaseCoordinator'
+import { EdgeDomClassification, EdgeDomClassifier } from './visual-search/EdgeDomClassifier'
+import {
+    EdgeBrowsingPool,
+    EdgeBrowsingSummary,
+    combineEdgeBrowsingSummaries,
+    emptyEdgeBrowsingSummary
+} from './rewards-api/EdgeBrowsingPool'
 
 import { Account, AccountProxy } from '../interfaces/Account'
 import Axios from '../utils/Axios'
@@ -49,10 +57,9 @@ interface NormalPhaseSummary {
     totalAccounts: number
 }
 
-interface NormalPhaseWorkerMessage {
-    type: 'normal-complete'
-    summary: NormalPhaseSummary
-}
+type WorkerPhaseMessage =
+    | { type: 'normal-complete'; summary: NormalPhaseSummary }
+    | { type: 'edge-complete'; summary: EdgeBrowsingSummary }
 
 
 // Main bot class
@@ -72,11 +79,13 @@ export class MicrosoftRewardsBot {
     private activeManagedBrowsers: Map<string, Set<ManagedBrowser>> = new Map()
     private spawnedInstances: MicrosoftRewardsBot[] = []
     private workerNormalSummaries: NormalPhaseSummary[] = []
-    private workerStates: Map<number, { totalAccounts: number; reported: boolean }> = new Map()
+    private workerEdgeSummaries: EdgeBrowsingSummary[] = []
+    private workerStates: Map<number, { totalAccounts: number; normalReported: boolean; edgeReported: boolean }> = new Map()
     private browserFactory: Browser = new Browser(this)
     private accounts: Account[]
     private login = new Login(this)
     private accessToken: string = ''
+    private edgePool: EdgeBrowsingPool | null = null
 
     public axios!: Axios
 
@@ -124,52 +133,86 @@ export class MicrosoftRewardsBot {
 
         const accountChunks = this.utils.chunkArray(this.accounts, this.config.clusters)
         this.activeWorkers = accountChunks.length
+        let resolveEdgeCompletion!: (summary: EdgeBrowsingSummary) => void
+        const edgeCompletion = new Promise<EdgeBrowsingSummary>(resolve => { resolveEdgeCompletion = resolve })
+        let edgeCompletionResolved = false
+        let finalPhasesStarted = false
 
         if (this.activeWorkers === 0) {
             log('main', 'MAIN-PRIMARY', 'No account chunks to process. Exiting main process!')
             process.exit(0)
         }
 
+        const combineNormalSummaries = (): NormalPhaseSummary => this.workerNormalSummaries.reduce<NormalPhaseSummary>((combined, summary) => ({
+            candidates: [...combined.candidates, ...summary.candidates],
+            completedAccounts: combined.completedAccounts + summary.completedAccounts,
+            failedAccounts: combined.failedAccounts + summary.failedAccounts,
+            totalAccounts: combined.totalAccounts + summary.totalAccounts
+        }), { candidates: [], completedAccounts: 0, failedAccounts: 0, totalAccounts: 0 })
+
+        const startFinalPhases = (): void => {
+            if (finalPhasesStarted || this.workerStates.size !== accountChunks.length) return
+            if (!Array.from(this.workerStates.values()).every(state => state.normalReported)) return
+            finalPhasesStarted = true
+            const normal = combineNormalSummaries()
+            void this.runFinalPhases(normal.candidates, () => edgeCompletion)
+                .then(({ edge, visual }) => {
+                    this.logSummary(normal, edge, visual)
+                    process.exit(0)
+                })
+                .catch(error => {
+                    log('main', 'MAIN-ERROR', `Final phase coordination failed: ${error}`, 'error')
+                    process.exit(1)
+                })
+        }
+
         for (let i = 0; i < accountChunks.length; i++) {
             const worker = cluster.fork()
             const chunk = accountChunks[i]
             const workerId = worker.id
-            this.workerStates.set(workerId, { totalAccounts: chunk?.length ?? 0, reported: false })
-            worker.on('message', (message: NormalPhaseWorkerMessage) => {
-                if (message?.type !== 'normal-complete') return
-                this.workerNormalSummaries.push(message.summary)
+            this.workerStates.set(workerId, {
+                totalAccounts: chunk?.length ?? 0,
+                normalReported: false,
+                edgeReported: false
+            })
+            worker.on('message', (message: WorkerPhaseMessage) => {
                 const state = this.workerStates.get(workerId)
-                if (state) state.reported = true
+                if (!state) return
+                if (message?.type === 'normal-complete' && !state.normalReported) {
+                    this.workerNormalSummaries.push(message.summary)
+                    state.normalReported = true
+                    startFinalPhases()
+                } else if (message?.type === 'edge-complete' && !state.edgeReported) {
+                    this.workerEdgeSummaries.push(message.summary)
+                    state.edgeReported = true
+                }
             })
             worker.send({ emails: (chunk ?? []).map(account => account.email) })
         }
 
-        cluster.on('exit', async (worker, code) => {
+        cluster.on('exit', (worker, code) => {
             this.activeWorkers -= 1
             const state = this.workerStates.get(worker.id)
-            if (state && !state.reported) {
+            if (state && !state.normalReported) {
                 this.workerNormalSummaries.push({
                     candidates: [],
                     completedAccounts: 0,
                     failedAccounts: state.totalAccounts,
                     totalAccounts: state.totalAccounts
                 })
+                state.normalReported = true
             }
-            this.workerStates.delete(worker.id)
+            if (state && !state.edgeReported) {
+                this.workerEdgeSummaries.push(emptyEdgeBrowsingSummary())
+                state.edgeReported = true
+            }
 
             log('main', 'MAIN-WORKER', `Worker ${worker.process.pid} destroyed | Code: ${code} | Active workers: ${this.activeWorkers}`, 'warn')
 
-            // Check if all workers have exited
-            if (this.activeWorkers === 0) {
-                const normal = this.workerNormalSummaries.reduce<NormalPhaseSummary>((combined, summary) => ({
-                    candidates: [...combined.candidates, ...summary.candidates],
-                    completedAccounts: combined.completedAccounts + summary.completedAccounts,
-                    failedAccounts: combined.failedAccounts + summary.failedAccounts,
-                    totalAccounts: combined.totalAccounts + summary.totalAccounts
-                }), { candidates: [], completedAccounts: 0, failedAccounts: 0, totalAccounts: 0 })
-                const visual = await this.runVisualPhase(normal.candidates)
-                this.logSummary(normal, visual)
-                process.exit(0)
+            startFinalPhases()
+            if (this.activeWorkers === 0 && !edgeCompletionResolved) {
+                edgeCompletionResolved = true
+                resolveEdgeCompletion(combineEdgeBrowsingSummaries(this.workerEdgeSummaries))
             }
         })
     }
@@ -187,6 +230,7 @@ export class MicrosoftRewardsBot {
         let completedAccounts = 0
         let failedAccounts = 0
         const candidates: VisualSearchCandidate[] = []
+        this.initializeEdgePool()
 
         // Randomise account order each run so accounts sharing an egress IP/proxy don't present a
         // stable processing sequence (and fixed inter-account time offsets) day after day.
@@ -307,7 +351,6 @@ export class MicrosoftRewardsBot {
             }
         }
 
-        // 报告最终结果
         const normal: NormalPhaseSummary = {
             candidates,
             completedAccounts,
@@ -315,10 +358,12 @@ export class MicrosoftRewardsBot {
             totalAccounts: accounts.length
         }
         if (cluster.isWorker && this.config.clusters > 1 && process.send) {
-            const message: NormalPhaseWorkerMessage = { type: 'normal-complete', summary: normal }
-            await new Promise<void>(resolve => process.send?.(message, () => resolve()))
+            await this.sendWorkerMessage({ type: 'normal-complete', summary: normal })
+            const edge = await this.drainEdgePhase()
+            await this.sendWorkerMessage({ type: 'edge-complete', summary: edge })
         } else {
-            const visual = await this.runVisualPhase(candidates)
+            const { edge, visual } = await this.runFinalPhases(candidates)
+            this.logEdgeSummary(edge)
             this.logVisualSummary(visual)
         }
 
@@ -328,6 +373,44 @@ export class MicrosoftRewardsBot {
         
         log(this.isMobile, 'MAIN-PRIMARY', 'Completed tasks for ALL accounts', 'log', 'green')
         process.exit()
+    }
+
+    private async sendWorkerMessage(message: WorkerPhaseMessage): Promise<void> {
+        await new Promise<void>(resolve => {
+            if (!process.send) {
+                resolve()
+                return
+            }
+            process.send(message, () => resolve())
+        })
+    }
+
+    private async drainEdgePhase(): Promise<EdgeBrowsingSummary> {
+        try {
+            return this.edgePool ? await this.edgePool.drain() : emptyEdgeBrowsingSummary()
+        } catch (error) {
+            log('main', 'EDGE-BROWSING', `Drain failed: ${error}`, 'error')
+            return this.edgePool?.summary() ?? emptyEdgeBrowsingSummary()
+        }
+    }
+
+    private async runFinalPhases(
+        candidates: VisualSearchCandidate[],
+        edgeTask: () => Promise<EdgeBrowsingSummary> = () => this.drainEdgePhase()
+    ): Promise<{ edge: EdgeBrowsingSummary; visual: VisualSearchResult[] }> {
+        const result = await runParallelFinalPhases(
+            edgeTask,
+            () => this.runVisualPhase(candidates),
+            () => this.edgePool?.summary() ?? emptyEdgeBrowsingSummary(),
+            error => candidates.map(candidate => ({
+                email: candidate.email,
+                status: 'failed' as const,
+                reason: error instanceof Error ? error.message : String(error)
+            }))
+        )
+        if (result.edgeError) log('main', 'EDGE-BROWSING', `Final drain failed: ${result.edgeError}`, 'error')
+        if (result.visualError) log('main', 'VISUAL-SEARCH', `Final Visual phase failed: ${result.visualError}`, 'error')
+        return { edge: result.edge, visual: result.visual }
     }
 
     /**
@@ -420,10 +503,31 @@ export class MicrosoftRewardsBot {
         log('main', 'MAIN-SUMMARY', `Visual Search: completed=${completed}, unconfirmed=${unconfirmed}, failed=${failed}, skipped=${skipped}`)
     }
 
-    private logSummary(normal: NormalPhaseSummary, visual: VisualSearchResult[]): void {
+    private logSummary(normal: NormalPhaseSummary, edge: EdgeBrowsingSummary, visual: VisualSearchResult[]): void {
         log('main', 'MAIN-SUMMARY', `Successful accounts: ${normal.completedAccounts}/${normal.totalAccounts}`, 'log', 'green')
         log('main', 'MAIN-SUMMARY', `Failed accounts: ${normal.failedAccounts}/${normal.totalAccounts}`, 'log', normal.failedAccounts > 0 ? 'yellow' : 'green')
+        this.logEdgeSummary(edge)
         this.logVisualSummary(visual)
+    }
+
+    private logEdgeSummary(summary: EdgeBrowsingSummary): void {
+        const total = Object.values(summary).reduce((sum, count) => sum + count, 0)
+        if (total === 0) return
+        log('main', 'MAIN-SUMMARY', `Edge browsing: completed=${summary.completed}, waiting=${summary.waiting}, capped=${summary.capped}, inactive=${summary.inactive}, absent=${summary.absent}, failed=${summary.failed}`)
+    }
+
+    private initializeEdgePool(): void {
+        if (this.config.workers.doEdgeBrowsing === false || this.edgePool) return
+        this.edgePool = new EdgeBrowsingPool({
+            config: this.config.edgeBrowsing,
+            sessionPath: this.config.sessionPath,
+            requestFactory: () => {
+                const client = new Axios(DIRECT_ACCOUNT_PROXY)
+                return request => client.request(request)
+            },
+            wait: milliseconds => this.utils.wait(milliseconds),
+            log: (message, type = 'log') => log(false, 'EDGE-BROWSING', message, type)
+        })
     }
 
     private async processAccount(account: Account): Promise<VisualSearchCandidate | null> {
@@ -514,6 +618,7 @@ export class MicrosoftRewardsBot {
         let managedBrowser: ManagedBrowser | null = null
         let sessionStable = false
         let visualCandidate: VisualSearchCandidate | null = null
+        let edgeClassification: EdgeDomClassification | null = null
 
         try {
             managedBrowser = await this.browserFactory.createBrowser({
@@ -543,9 +648,28 @@ export class MicrosoftRewardsBot {
                 }
             }
 
+            if (this.config.workers.doEdgeBrowsing !== false && this.edgePool) {
+                edgeClassification = await new EdgeDomClassifier(
+                    this.homePage,
+                    milliseconds => this.utils.wait(milliseconds)
+                ).classify()
+                await this.edgePool.recordClassification(account.email, edgeClassification)
+                const edgeMessage = `DOM classification: ${edgeClassification.status}${edgeClassification.progress !== undefined ? ` (${edgeClassification.progress}/${edgeClassification.max})` : ''}${edgeClassification.reason ? ` (${edgeClassification.reason})` : ''}`
+                log(this.isMobile, 'EDGE-BROWSING', edgeMessage, edgeClassification.status === 'unknown' ? 'warn' : 'log')
+            }
+
             // The new rewards.bing.com SPA has no scrapable dashboard, so data + activity completion go
             // through the dapi backend. Get the OAuth token, then claim activities via the API.
-            this.accessToken = await this.login.getMobileAccessToken(this.homePage, account.email)
+            const tokenBundle = await this.login.getMobileAccessToken(this.homePage, account.email)
+            this.accessToken = tokenBundle.access_token
+
+            if (edgeClassification?.status === 'in_progress' && this.edgePool) {
+                await this.edgePool.enroll({
+                    email: account.email,
+                    token: tokenBundle,
+                    dom: edgeClassification
+                })
+            }
 
             const earner = new RewardsEarner(this, this.accessToken)
             const result = await earner.run()
@@ -658,7 +782,8 @@ export class MicrosoftRewardsBot {
             // Reuses the saved desktop session when possible (fast, no credential re-entry / anti-throttle)
             await this.login.login(this.homePage, account.email, account.password)
             sessionStable = true
-            this.accessToken = await this.login.getMobileAccessToken(this.homePage, account.email)
+            const tokenBundle = await this.login.getMobileAccessToken(this.homePage, account.email)
+            this.accessToken = tokenBundle.access_token
 
             // Mobile search points via real, human-paced searches (activities are claimed in Desktop()).
             const searchPage = await managedBrowser.context.newPage()

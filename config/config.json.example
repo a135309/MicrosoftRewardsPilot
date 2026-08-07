@@ -18,8 +18,9 @@
         "doMobileSearch": false,
         "doDailyCheckIn": true,
         "doReadToEarn": true,
-"doVisualSearch": true,
-        "doClaimablePoints": true
+        "doVisualSearch": true,
+        "doClaimablePoints": true,
+        "doEdgeBrowsing": true
     },
     "visualSearch": {
         "imageDirectory": "visual-search-images",
@@ -50,6 +51,17 @@
     "accountDelay": {
         "min": "5min",
         "max": "8min"
+    },
+    "edgeBrowsing": {
+        "finalConcurrency": 3,
+        "intervalSec": 305,
+        "maxAttemptsPerDay": 6,
+        "targetMinutes": 30,
+        "drainTimeoutMin": 90,
+        "startJitterSec": {
+            "min": 2,
+            "max": 5
+        }
     },
     "searchSettings": {
         "useGeoLocaleQueries": true,
