@@ -22,6 +22,7 @@ export interface Config {
     popupHandling?: ConfigPopupHandling;
     passkeyHandling?: ConfigPasskeyHandling;
     visualSearch?: Partial<ConfigVisualSearch>;
+    edgeBrowsing?: Partial<ConfigEdgeBrowsing>;
 }
 
 export interface ConfigSaveFingerprint {
@@ -95,6 +96,19 @@ export interface ConfigWorkers {
     doReadToEarn: boolean;
     doVisualSearch?: boolean;
     doClaimablePoints?: boolean;
+    doEdgeBrowsing?: boolean;
+}
+
+export interface ConfigEdgeBrowsing {
+    finalConcurrency: number;
+    intervalSec: number;
+    maxAttemptsPerDay: number;
+    targetMinutes: number;
+    drainTimeoutMin: number;
+    startJitterSec: {
+        min: number;
+        max: number;
+    };
 }
 
 export interface ConfigVisualSearch {

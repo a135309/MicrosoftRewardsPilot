@@ -3,6 +3,7 @@ import { log } from './Logger'
 import { loadConfig } from './Load'
 import { normalizeSearchDelayConfig } from '../src/anti-detection/intelligent-delay'
 import { validateVisualSearchConfig } from '../src/visual-search/types'
+import { validateEdgeBrowsingConfig } from '../src/rewards-api/EdgeBrowsingPool'
 
 // 定义自动时区配置接口
 interface AutoTimezoneConfig {
@@ -260,7 +261,11 @@ export class StartupConfig {
             if (config.workers.doVisualSearch !== undefined && typeof config.workers.doVisualSearch !== 'boolean') {
                 issues.push('workers.doVisualSearch must be a boolean')
             }
+            if (config.workers.doEdgeBrowsing !== undefined && typeof config.workers.doEdgeBrowsing !== 'boolean') {
+                issues.push('workers.doEdgeBrowsing must be a boolean')
+            }
             issues.push(...validateVisualSearchConfig(config.visualSearch))
+            issues.push(...validateEdgeBrowsingConfig(config.edgeBrowsing))
             
             const isValid = issues.length === 0
             

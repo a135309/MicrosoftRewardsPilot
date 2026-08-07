@@ -632,7 +632,7 @@ export class Login {
         }
     }
 
-    async getMobileAccessToken(page: Page, email: string) {
+    async getMobileAccessToken(page: Page, email: string): Promise<OAuth> {
         const authorizeUrl = new URL(this.authBaseUrl)
 
         authorizeUrl.searchParams.append('response_type', 'code')
@@ -693,7 +693,7 @@ export class Login {
 
         const authDuration = Date.now() - authStart
         this.bot.log(this.bot.isMobile, 'LOGIN-APP', `Successfully authorized in ${Math.round(authDuration/1000)}s`)
-        return tokenData.access_token
+        return tokenData
     }
 
     // Utils
