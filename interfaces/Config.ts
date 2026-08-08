@@ -97,6 +97,7 @@ export interface ConfigWorkers {
     doVisualSearch?: boolean;
     doClaimablePoints?: boolean;
     doEdgeBrowsing?: boolean;
+    doEarnDailyTasks?: boolean;
 }
 
 export interface ConfigEdgeBrowsing {

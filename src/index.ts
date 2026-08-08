@@ -28,6 +28,7 @@ import {
     resolveVisualSearchProxy
 } from './visual-search/types'
 import { ClaimablePointsRunner } from './rewards-api/ClaimablePointsRunner'
+import { EarnTaskRunner } from './rewards-api/EarnTaskRunner'
 import { runParallelFinalPhases } from './FinalPhaseCoordinator'
 import { EdgeDomClassification, EdgeDomClassifier } from './visual-search/EdgeDomClassifier'
 import {
@@ -671,9 +672,26 @@ export class MicrosoftRewardsBot {
                 })
             }
 
+            const rewardsApi = new RewardsApi(this, this.accessToken)
             const earner = new RewardsEarner(this, this.accessToken)
             const result = await earner.run()
             log(this.isMobile, 'MAIN-POINTS', `Desktop activities done: claimed ${result.claimed}, +${result.pointsGained} points (balance ${result.balance})`)
+
+            if (this.config.workers.doEarnDailyTasks !== false) {
+                try {
+                    const earnTasks = await new EarnTaskRunner(this, this.homePage, rewardsApi).run()
+                    log(
+                        this.isMobile,
+                        'MAIN-EARN-TASKS',
+                        `Earn page tasks done: attempted ${earnTasks.attempted}, completed ${earnTasks.completed}, ` +
+                        `advanced ${earnTasks.advanced}, skipped ${earnTasks.skipped}, failed ${earnTasks.failed}`,
+                        earnTasks.failed > 0 ? 'warn' : 'log',
+                        earnTasks.failed > 0 ? 'yellow' : 'green'
+                    )
+                } catch (earnError) {
+                    log(this.isMobile, 'MAIN-EARN-TASKS', `Earn page task module failed: ${earnError}`, 'warn')
+                }
+            }
 
             // Earn search points with real, human-paced Bing searches (search is not claimable via the API)
             if (this.config.workers.doDesktopSearch !== false) {
