@@ -264,6 +264,9 @@ export class StartupConfig {
             if (config.workers.doEdgeBrowsing !== undefined && typeof config.workers.doEdgeBrowsing !== 'boolean') {
                 issues.push('workers.doEdgeBrowsing must be a boolean')
             }
+            if (config.workers.doEarnDailyTasks !== undefined && typeof config.workers.doEarnDailyTasks !== 'boolean') {
+                issues.push('workers.doEarnDailyTasks must be a boolean')
+            }
             issues.push(...validateVisualSearchConfig(config.visualSearch))
             issues.push(...validateEdgeBrowsingConfig(config.edgeBrowsing))
             

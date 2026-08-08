@@ -142,14 +142,15 @@ services:
 }
 ```
 ### Task Configuration
-> Other claimable activities (daily set, check-ins, read-to-earn, puzzles) are auto-claimed and need no toggle.
+> DAPI claimables stay enabled independently. `doEarnDailyTasks` performs real `/earn` card clicks, then verifies DOM completion. It skips missing, locked, answer-required and non-task promotional destinations.
 ```json
 {
   "workers": {
     "doDesktopSearch": true,   // Desktop search
     "doMobileSearch": false,   // Disabled: shares the search-points cap with desktop
     "doMorePromotions": true,  // Explore on Bing / promotional tasks
-    "doClaimablePoints": true  // Claim dashboard Ready-to-claim points after search
+    "doClaimablePoints": true, // Claim dashboard Ready-to-claim points after search
+    "doEarnDailyTasks": true   // Click and verify eligible /earn cards and quest actions
   }
 }
 ```
@@ -372,7 +373,8 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
     "doDesktopSearch": true,
     "doMobileSearch": false,
     "doMorePromotions": true,
-    "doClaimablePoints": true
+    "doClaimablePoints": true,
+    "doEarnDailyTasks": true
   },
   "searchOnBingLocalQueries": true,
   "globalTimeout": "180min",

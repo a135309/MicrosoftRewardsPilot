@@ -374,7 +374,8 @@ docker exec microsoftrewardspilot curl -s https://ipapi.co/json
     "doDesktopSearch": true,
     "doMobileSearch": false,
     "doMorePromotions": true,
-    "doClaimablePoints": true
+    "doClaimablePoints": true,
+    "doEarnDailyTasks": true
   },
   "searchOnBingLocalQueries": true,
   "globalTimeout": "180min",

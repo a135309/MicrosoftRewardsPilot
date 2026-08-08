@@ -20,7 +20,8 @@
         "doReadToEarn": true,
         "doVisualSearch": true,
         "doClaimablePoints": true,
-        "doEdgeBrowsing": true
+        "doEdgeBrowsing": true,
+        "doEarnDailyTasks": true
     },
     "visualSearch": {
         "imageDirectory": "visual-search-images",
